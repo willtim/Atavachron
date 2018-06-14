@@ -6,12 +6,12 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
-
--- | Functions and types for processing chunks, e.g. hashing,
+-- | Functions and types for encoding binary chunks, e.g. hashing,
 -- compression and encryption.
 
-module Atavachron.Chunk.Process where
+module Atavachron.Chunk.Encode where
 
 import Codec.Serialise
 
@@ -41,6 +41,7 @@ import qualified Atavachron.Streaming as S
 
 import GHC.Generics (Generic)
 
+type Offset = Int
 
 newtype StoreID = StoreID { unStoreID :: B.ByteString }
     deriving (Generic, Eq, Show, Read)
@@ -60,22 +61,28 @@ instance Serialise StoreIDKey where
     decode = maybe (fail "expected Auth.Key") (return . StoreIDKey) . Saltine.decode =<< decode
 
 
--- | Plaintext chunks with a store ID and a sequence of tags,
+-- | Chunk metadata with a store ID and a sequence of tags,
 -- representing zero or more boundaries in the chunk.
-data PlainChunk t = PlainChunk
-  { pcStoreID :: !StoreID
-  , pcOffsets :: !(TaggedOffsets t)
-  , pcContent :: !B.ByteString
-  } deriving Show
-
-
--- | A Cipher chunk contains an encrypted and authenticated secret box.
-data CipherChunk t = CipherChunk
-  { ccStoreID   :: !StoreID
-  , ccOffsets   :: !(TaggedOffsets t)
-  , ccNonce     :: !SecretBox.Nonce
-  , ccSecretBox :: !B.ByteString
+data Chunk t c = Chunk
+  { cStoreID :: !StoreID
+  , cOffsets :: !(TaggedOffsets t)
+  , cContent :: !c
   }
+
+-- | A CipherText object contains an encrypted and authenticated secret box.
+data CipherText = CipherText
+  { cNonce     :: !SecretBox.Nonce
+  , cSecretBox :: !B.ByteString
+  } deriving Generic
+
+type PlainChunk t = Chunk t B.ByteString
+type CipherChunk t = Chunk t CipherText
+
+instance Serialise CipherText
+
+instance Serialise SecretBox.Key where
+    encode n = encode $ Saltine.encode n
+    decode = maybe (fail "expected SecretBox.Key") return . Saltine.decode =<< decode
 
 instance Serialise SecretBox.Nonce where
     encode n = encode $ Saltine.encode n
@@ -94,49 +101,57 @@ hexEncode :: StoreID -> Text
 hexEncode = T.pack . L8.unpack . Builder.toLazyByteString . Builder.byteStringHex . unStoreID
 
 -- | Calculate the storage IDs using a Hash message authentication code.
-hash :: StoreIDKey -> RawChunk (TaggedOffsets t) B.ByteString -> PlainChunk t
-hash (StoreIDKey key) (RawChunk offsets bs) =
-    let !storageID = StoreID $ Saltine.encode $ Auth.auth key bs
-    in PlainChunk storageID offsets bs
+hashChunk :: StoreIDKey -> RawChunk (TaggedOffsets t) B.ByteString -> PlainChunk t
+hashChunk key (RawChunk offsets bs) = Chunk (hashBytes key bs) offsets bs
 
+hashBytes :: StoreIDKey -> B.ByteString -> StoreID
+hashBytes (StoreIDKey key) bytes = StoreID $ Saltine.encode $ Auth.auth key bytes
 
 newtype VerifyFailed t = VerifyFailed { unVerifyFailed :: PlainChunk t }
 
 -- | Use the Hash message authentication code to verify existing storage ID.
 verify :: StoreIDKey -> PlainChunk t -> Either (VerifyFailed t) (PlainChunk t)
-verify (StoreIDKey key) pc@PlainChunk{..} =
-    let !hashResult = StoreID $ Saltine.encode $ Auth.auth key pcContent
-    in if hashResult == pcStoreID
+verify (StoreIDKey key) pc@Chunk{..} =
+    let !hashResult = StoreID $ Saltine.encode $ Auth.auth key cContent
+    in if hashResult == cStoreID
        then Right pc
        else Left (VerifyFailed pc)
 
 
-encrypt :: MonadIO m => ChunkKey -> PlainChunk t -> m (CipherChunk t)
-encrypt (ChunkKey key) PlainChunk{..} = do
+encryptChunk :: MonadIO m => ChunkKey -> PlainChunk t -> m (CipherChunk t)
+encryptChunk key c = do
+    ciphertext <- encryptBytes (unChunkKey key) (cContent c)
+    return $ c { cContent = ciphertext }
+
+encryptBytes :: MonadIO m => SecretBox.Key -> B.ByteString -> m CipherText
+encryptBytes key content = do
     nonce <- liftIO newNonce
-    return $ CipherChunk
-        { ccStoreID   = pcStoreID
-        , ccOffsets   = pcOffsets
-        , ccNonce     = nonce
-        , ccSecretBox = SecretBox.secretbox key nonce pcContent
+    return $ CipherText
+        { cNonce     = nonce
+        , cSecretBox = SecretBox.secretbox key nonce content
         }
 
+decryptChunk :: ChunkKey -> CipherChunk t -> Maybe (PlainChunk t)
+decryptChunk key c = do
+    plaintext <- decryptBytes (unChunkKey key) (cContent c)
+    return $ c { cContent = plaintext }
 
-decrypt :: ChunkKey -> CipherChunk t -> Maybe (PlainChunk t)
-decrypt (ChunkKey key) CipherChunk{..} =
-    PlainChunk ccStoreID ccOffsets
-        <$> SecretBox.secretboxOpen key ccNonce ccSecretBox
-
+decryptBytes :: SecretBox.Key -> CipherText -> Maybe B.ByteString
+decryptBytes key CipherText{..} =
+    SecretBox.secretboxOpen key cNonce cSecretBox
 
 -- | Try LZ4 compression, which is extremely fast.
-compress :: PlainChunk t -> PlainChunk t
-compress c =
-    c { pcContent = fromMaybe (pcContent c) $ LZ4.compress (pcContent c) }
+compressChunk :: PlainChunk t -> PlainChunk t
+compressChunk c = c { cContent = compress (cContent c) }
 
+decompressChunk :: PlainChunk t -> PlainChunk t
+decompressChunk c = c { cContent = decompress (cContent c) }
 
-decompress :: PlainChunk t -> PlainChunk t
-decompress c =
-    c { pcContent = fromMaybe (pcContent c) $ LZ4.decompress (pcContent c) }
+compress :: B.ByteString -> B.ByteString
+compress bs = fromMaybe bs $ LZ4.compress bs
+
+decompress :: B.ByteString -> B.ByteString
+decompress bs = fromMaybe bs $ LZ4.decompress bs
 
 
 -- | Group and aggregate an input stream of tagged-offset/payload
@@ -145,7 +160,7 @@ decompress c =
 -- function @f@.
 groupByTag
     :: forall a b t m r . (Eq t, Monad m)
-    => (Seq (a, Int) -> b)               -- ^ aggregation function for offset/payload pairs
+    => (Seq (a, Offset) -> b)            -- ^ aggregation function for offset/payload pairs
     -> Stream' (TaggedOffsets t, a) m r  -- ^ input is tagged offsets with a payload
     -> Stream' (t, b) m r                -- ^ output is one event per tag with aggregate
 groupByTag f
@@ -184,7 +199,7 @@ rechunkToTags
     = S.concat
     . S.map step
     . S.mapAccum_ addZeroOffsetTags Nothing
-    . S.map (pcOffsets &&& pcContent)
+    . S.map (cOffsets &&& cContent)
   where
     step (!offsets, !content)
         = fmap (doOffset content)
@@ -192,7 +207,7 @@ rechunkToTags
           $ Seq.drop 1 (fmap snd offsets) Seq.|> B.length content
 
     doOffset :: B.ByteString
-             -> ((t, Int), Int)
+             -> ((t, Offset), Offset)
              -> RawChunk t B.ByteString
     doOffset !bs !((tag, offset), offset') =
         let (_, bs') = B.splitAt offset             bs

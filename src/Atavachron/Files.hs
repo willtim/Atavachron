@@ -6,7 +6,6 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -20,7 +19,10 @@ module Atavachron.Files where
 
 import Prelude hiding (concatMap)
 
+import Codec.Serialise
+
 import Control.Lens (over)
+import Control.Logging
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.State
@@ -28,11 +30,10 @@ import Control.Monad.Trans.Resource
 
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.Monoid
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as L8
-
-import Codec.Serialise
+import Data.Monoid
+import qualified Data.Text as T
 
 import qualified Streaming.Prelude as S hiding (mapM_)
 
@@ -41,9 +42,10 @@ import qualified System.Posix.IO.ByteString as IO
 import qualified System.Posix.Directory.ByteString as Dir
 import System.Posix.Types
 
+import Atavachron.Env
 import Atavachron.Path
 import Atavachron.Chunk.Builder
-import Atavachron.Types
+import Atavachron.Tree
 import Atavachron.Streaming (Stream')
 import qualified Atavachron.IO as IO
 import qualified Atavachron.Streaming as S
@@ -57,9 +59,6 @@ writeCacheFile
     -> Stream' entry m r
     -> m r
 writeCacheFile file str = do
-
-    liftIO $ putStrLn $ "Opening file:" ++ getFilePath file -- TODO logging
-
     let rfp = getRawFilePath file
     (key, fd) <- allocate (IO.openFd rfp IO.WriteOnly (Just Files.stdFileMode) IO.defaultFileFlags { IO.trunc = True })
                           (IO.closeFd)
@@ -137,7 +136,12 @@ saveFiles str = do
         return $ Handle file key fd
 
     closeFile Handle{..} = do
+        liftIO $ Files.setFdOwnerAndGroup hFd (fileUID hFile)   (fileGID hFile)
+        liftIO $ Files.setFdTimesHiRes    hFd (fileATime hFile) (fileMTime hFile)
         release hKey
+        fp <- liftIO $ getFilePath $ filePath hFile
+        debug' $ "Wrote file '" <> T.pack fp <> "'"
+
 
 
 -- | Produce a stream of file chunks from a stream of filenames.
@@ -153,6 +157,10 @@ readFiles = S.concatMap $ \file -> do
     readFileChunks :: FileItem -> Stream' B.ByteString m ()
     readFileChunks FileMeta{..} = do
         let !rfp = getRawFilePath filePath
+
+        fp <- liftIO $ getFilePath filePath
+        debug' $ "Reading file '" <> T.pack fp <> "'"
+
         (key, fd) <- allocate (IO.openFd rfp IO.ReadOnly (Just Files.stdFileMode) IO.defaultFileFlags)
                               (IO.closeFd)
         IO.fdGetContents fd $ (fromIntegral $ fileSize + 1) `min` 1048576 -- 1MB chunk size

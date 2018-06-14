@@ -31,7 +31,7 @@ import Crypto.Saltine
 import Atavachron.Path
 import Atavachron.Chunk.Builder
 import Atavachron.Chunk.CDC
-import Atavachron.Chunk.Process
+import Atavachron.Chunk.Encode
 import Atavachron.Streaming
 
 --main = defaultMain chunkTests
@@ -68,11 +68,11 @@ prop_inverse =
         cdcKey   <- newCDCKey
         collectByFile
             . rechunkToTags
-            . S.map  decompress
-            . S.map  (fromMaybe (error "decrypt failed") . decrypt chunkKey)
-            . S.mapM (encrypt chunkKey)
-            . S.map  compress
-            . S.map  (hash hashKey)
+            . S.map  decompressChunk
+            . S.map  (fromMaybe (error "decrypt failed") . decryptChunk chunkKey)
+            . S.mapM (encryptChunk chunkKey)
+            . S.map  compressChunk
+            . S.map  (hashChunk hashKey)
             . rechunkCDC cdcKey params
             $ S.each (map (uncurry RawChunk) fileData)
     assert $ fileData == fileData'

@@ -12,18 +12,14 @@
 -- The standard library FilePath (a synonym for String) is flawed, in
 -- that it takes the bytes returned by a POSIX system call and assumes
 -- a default encoding when no encoding information was given. It is
--- also inefficient to re-allocate all this string data on the Haskell
--- heap, when instead one can just keep references to the original
--- returned bytes.
+-- also somewhat inefficient to re-allocate all this string data on
+-- the Haskell heap, when instead one can just keep references to the
+-- original returned bytes.
 
 module Atavachron.Path where
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
---import qualified Data.ByteString.Unsafe as B
-
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as E
 
 import Codec.Serialise
 
@@ -33,14 +29,16 @@ import Data.Monoid
 import Data.Foldable
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
+import qualified Data.Text as T
+import Data.Text.Encoding (encodeUtf8)
 
+import qualified System.FilePath.Posix as FilePath
 import System.Posix.ByteString.FilePath
 
---import qualified GHC.IO.Encoding as GHC
---import qualified GHC.Foreign as GHC
+import qualified GHC.IO.Encoding as GHC
+import qualified GHC.Foreign as GHC
 
 import qualified Data.List as List
-
 
 type RawName = B.ByteString
 
@@ -111,7 +109,7 @@ getRawFilePath = B.concat . ("/":) . List.intersperse "/" . go
     go (FilePath dir n) = go dir <> [n]
 
 
--- | relativise the second path, using the first path as the prefix.
+-- | Relativise the second path, using the first path as the prefix.
 relativise :: Path Abs Dir -> Path Abs t -> Maybe (Path Rel t)
 relativise prefix absDir@(AbsDir{})      = makeRelDir prefix absDir
 relativise prefix (FilePath absDir name) = flip makeFilePath name <$> makeRelDir prefix absDir
@@ -122,7 +120,7 @@ relativise' prefix path
     = fromMaybe (error "relativise': Assertion failed")
     $ relativise prefix path
 
--- | NOTE: The supplied directory paths must share a common prefix.
+-- NOTE: The supplied directory paths must share a common prefix.
 makeRelDir :: Path Abs Dir -> Path Abs Dir -> Maybe (Path Rel Dir)
 makeRelDir path1 path2
     | root  <- getCommonPrefix path1 path2
@@ -186,6 +184,17 @@ instance Serialise (Path Rel File) where
 
 -- | This is necessary in order to use many Haskell library
 -- functions.
--- TODO use  GHC.getFileSystemEncoding
-getFilePath :: Path b t -> FilePath
-getFilePath = T.unpack . E.decodeUtf8 . getRawFilePath
+getFilePath :: Path b t -> IO FilePath
+getFilePath p = do
+    let !rfp = getRawFilePath p
+    enc <- GHC.getFileSystemEncoding
+    B.useAsCString rfp $! GHC.peekCString enc
+
+-- TODO should use GHC.getFileSystemEncoding
+parseAbsDir :: FilePath -> Maybe (Path Abs Dir)
+parseAbsDir fp
+    | FilePath.isValid fp && FilePath.isAbsolute fp =
+      case FilePath.splitDirectories fp of
+          ("/":ns) -> Just $ AbsDir (Seq.fromList $ map (encodeUtf8 . T.pack) ns)
+          _        -> Nothing
+    | otherwise = Nothing

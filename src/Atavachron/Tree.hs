@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -9,11 +10,14 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Functions for enumerating files and directories, performing diffs
 -- and serialising/deserialising the resultant file metadata.
 
 module Atavachron.Tree where
+
+import Codec.Serialise
 
 import Control.Monad
 import Control.Monad.Catch
@@ -21,34 +25,93 @@ import Control.Monad.ST.Unsafe
 import Control.Monad.Reader
 import Control.Monad.Trans.Resource
 
-import Codec.Serialise
-
-import Data.Maybe
-import Data.Monoid
-
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
-
+import Data.Function (on)
+import Data.Int
+import Data.Maybe
+import Data.Monoid
 import qualified Data.List as List
+import Data.Ord (comparing)
 import qualified Data.Sequence as Seq
+import Data.Time (NominalDiffTime)
 
 import Streaming
 import Streaming.Prelude (yield, next)
 import qualified Streaming.Prelude as S
 
-import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
-
+import System.Posix.Types
 import System.Posix.Files.ByteString (FileStatus)
 import qualified System.Posix.Files.ByteString as Files
 import qualified System.Posix.Directory.ByteString as Dir
 
-import Atavachron.Types
+import GHC.Generics (Generic)
+
+import Atavachron.Env
+import Atavachron.Repository
 import Atavachron.Path
 import Atavachron.Streaming (Stream')
 import qualified Atavachron.Streaming as S
 import Atavachron.Chunk.Builder
 
-import Data.Ord (comparing)
+
+data TreeEntry b
+  = FileEntry !(FileMeta (Path b File)) !ChunkList
+  | DirEntry  !(FileMeta (Path b Dir))
+  | LinkEntry !(FileMeta (Path b File)) !Target
+  deriving (Generic, Show)
+
+instance Serialise (TreeEntry Rel)
+
+-- | Tag for tree data.
+data Tree = Tree
+  deriving (Eq, Show)
+
+data FileCacheEntry b = FileCacheEntry
+    { ceFileItem  :: !(FileMeta (Path b File))
+    , ceChunkList :: !ChunkList
+    }
+  deriving (Generic)
+
+instance Serialise (FileCacheEntry Rel)
+
+-- | The FileMeta type contains exploded metadata for a file, directory or soft link.
+-- This is the archival format.
+data FileMeta path = FileMeta
+    { filePath   :: !path -- e.g. Abs/Rel File/Dir
+    , fileMode   :: !CMode
+    , fileUID    :: !CUid
+    , fileGID    :: !CGid
+    , fileMTime  :: !NominalDiffTime
+    , fileATime  :: !NominalDiffTime
+    , fileCTime  :: !NominalDiffTime
+    , fileINode  :: !Int64
+    , fileSize   :: !Int64
+    } deriving (Generic, Functor, Show)
+
+-- FileMeta has identity based on file path.
+instance Eq path => Eq (FileMeta path) where
+    (==) = (==) `on` filePath
+
+type FileItem = FileMeta (Path Abs File)
+type DirItem  = FileMeta (Path Abs Dir)
+
+-- | Non-regular files
+data OtherItem
+    = LinkItem !FileItem !Target
+    | DirItem  !DirItem
+    deriving Show
+
+type Target = B.ByteString
+
+data Kind = FileK | DirK | LinkK !Target
+    deriving (Generic, Eq, Show)
+
+instance (Serialise path) => Serialise (FileMeta path)
+
+instance Serialise NominalDiffTime where
+    encode = encode . toRational
+    decode = fromRational <$> decode
 
 -- | RawItem is what we generate using enumDir.
 -- Items can be either a regular file, a directory or a soft link.
@@ -57,6 +120,23 @@ data RawItem = RawItem
   , itemName   :: !RawName
   , itemStatus :: !FileStatus
   }
+
+-- | We use this class to relativise the paths in different structures.
+class HasPath e where
+    mapPath :: (forall t. Path b t -> Path b' t) -> e b -> e b'
+    getParent :: e Abs -> Path Abs Dir
+
+instance HasPath FileCacheEntry where
+    mapPath f (FileCacheEntry item chunks) = FileCacheEntry (item {filePath = f (filePath item)}) chunks
+    getParent (FileCacheEntry item _)      = parent (filePath item)
+
+instance HasPath TreeEntry where
+    mapPath f (FileEntry item chunks) = FileEntry (item {filePath = f (filePath item)}) chunks
+    mapPath f (DirEntry item)         = DirEntry  (item {filePath = f (filePath item)})
+    mapPath f (LinkEntry item target) = LinkEntry (item {filePath = f (filePath item)}) target
+    getParent (FileEntry item _)      = parent (filePath item)
+    getParent (DirEntry item)         = parent (filePath item)
+    getParent (LinkEntry item _)      = parent (filePath item)
 
 data PatchingError = PatchingError
     deriving Show
@@ -77,7 +157,7 @@ enumDir dir = do
       checkName ""   = release key
       checkName "."  = nextName
       checkName ".." = nextName
-      checkName ".atavachron" = nextName -- do not backup our working files
+      checkName ".cache" = nextName -- do not backup our working files
       checkName name = liftIO (Files.getSymbolicLinkStatus path)
                        >>= checkStat name path
           where path = rfp <> "/" <> name
@@ -133,14 +213,14 @@ recurseDir dir = do
 makeFileMeta :: RawItem -> Path b t -> FileMeta (Path b t)
 makeFileMeta RawItem{..} path = FileMeta
     { filePath  = path
-    , fileMode  =                         Files.fileMode              itemStatus
-    , fileUID   =                         Files.fileOwner             itemStatus
-    , fileGID   =                         Files.fileGroup             itemStatus
-    , fileMTime = posixSecondsToUTCTime $ Files.modificationTimeHiRes itemStatus
-    , fileATime = posixSecondsToUTCTime $ Files.accessTimeHiRes       itemStatus
-    , fileCTime = posixSecondsToUTCTime $ Files.statusChangeTimeHiRes itemStatus
-    , fileINode = fromIntegral          $ Files.fileID                itemStatus
-    , fileSize  = fromIntegral          $ Files.fileSize              itemStatus
+    , fileMode  =                Files.fileMode              itemStatus
+    , fileUID   =                Files.fileOwner             itemStatus
+    , fileGID   =                Files.fileGroup             itemStatus
+    , fileMTime =                Files.modificationTimeHiRes itemStatus
+    , fileATime =                Files.accessTimeHiRes       itemStatus
+    , fileCTime =                Files.statusChangeTimeHiRes itemStatus
+    , fileINode = fromIntegral $ Files.fileID                itemStatus
+    , fileSize  = fromIntegral $ Files.fileSize              itemStatus
     }
 
 -- | Compress paths in the incoming stream by encoding each successive
@@ -254,45 +334,17 @@ serialiseTree str = do
     S.map (RawChunk Tree . LB.toStrict . serialise)
       . relativePaths sourceDir
       . S.map mkTreeEntry
-      . reorderOtherItems
       . S.left compressLists
       $ str
   where
 
     mkTreeEntry
-        :: (Either (FileItem, ChunkListDelta) OtherItem)
+        :: (Either (FileItem, ChunkList) OtherItem)
         -> TreeEntry Abs
     mkTreeEntry (Left (file, chunks))         = FileEntry file chunks
     mkTreeEntry (Right (DirItem dir))         = DirEntry dir
     mkTreeEntry (Right (LinkItem lnk target)) = LinkEntry lnk target
 
-    -- The interleaving of non-regular files and (chunked/encoded)
-    -- regular files depends on the evaluation strategy used. For
-    -- example, uses of parallel map will read-ahead for only regular
-    -- files. This code ensures consistent ordering, to ensure
-    -- deduplication of snapshot tree chunks.
-    -- NOTE: This direct implementation turned out to be *much*
-    -- faster than one based on S.concat and S.mapAccum.
-    reorderOtherItems
-        :: Stream' (Either (FileItem, chunks) OtherItem) m r
-        -> Stream' (Either (FileItem, chunks) OtherItem) m r
-    reorderOtherItems = loop Seq.empty
-      where
-        loop !items !str = do
-            res <- lift $ next str
-            case res of
-                Left r -> return r
-                Right (e'item, str') ->
-                    case e'item of
-                        l@(Left (fileItem, _)) -> do
-                            let (!pending, !items') = Seq.spanl ((<= pathElems (filePath fileItem)) . elems) items
-                            S.each $ fmap Right pending Seq.|> l
-                            loop items' str'
-                        (Right nrItem) ->
-                            loop (items Seq.|> nrItem) str'
-
-        elems (DirItem item)    = pathElems (filePath item)
-        elems (LinkItem item _) = pathElems (filePath item)
 
 -- NOTE: it's catastrophic if we cannot deserialise the tree
 deserialiseTree
@@ -335,30 +387,32 @@ deserialiseTree str = do
 
 
 -- | An optimisation for small files, whereby we avoid repeated instances of
--- the same storeID.
+-- the same storeID, but writing out an empty list.
 compressLists
     :: Monad m
     => Stream' (t, ChunkList) m r
-    -> Stream' (t, ChunkListDelta) m r
+    -> Stream' (t, ChunkList) m r
 compressLists = flip S.mapAccum_ Nothing $ \prevCL (t, currCL) ->
-    let currCL' = case (unChunkList <$> prevCL, unChunkList currCL) of
-                      ( Just (Seq.viewr -> _ Seq.:> (storeID, _)),
-                        (Seq.viewl -> (storeID', offset) Seq.:< Seq.Empty))
-                                  | storeID == storeID' -> PrevChunk offset
-                      (_, chunks) | otherwise           -> NewChunkList chunks
+    let currCL' = case (clChunks <$> prevCL, clChunks currCL) of
+                      ( Just (Seq.viewr -> _ Seq.:> storeID),
+                        (Seq.viewl -> storeID' Seq.:< Seq.Empty))
+                            | storeID == storeID' -> ChunkList mempty (clOffset currCL)
+                      _                           -> currCL
     in (Just currCL, (t, currCL'))
 
 uncompressLists
     :: Monad m
-    => Stream' (t, ChunkListDelta) m r
+    => Stream' (t, ChunkList) m r
     -> Stream' (t, ChunkList) m r
 uncompressLists = flip S.mapAccum_ Nothing $ \prevChunk (t, currCL) ->
     let currCL' = case (prevChunk, currCL) of
-                      (Just storeID, PrevChunk offset)    -> ChunkList $ Seq.singleton (storeID, offset)
-                      (Nothing     , PrevChunk {})        -> error "unpackChunkLists: Assertion failed!"
-                      (_           , NewChunkList chunks) -> ChunkList chunks
+                      (Just storeID, ChunkList s offset)
+                          | null s -> ChunkList (Seq.singleton storeID) offset
+                      (Nothing     , ChunkList s _)
+                          | null s -> error "unpackChunkLists: Assertion failed!"
+                      _            -> currCL
         prevChunk'
-                = case unChunkList currCL' of
-                      (Seq.viewr -> _ Seq.:> (storeID, _)) -> Just storeID
+                = case clChunks currCL' of
+                      (Seq.viewr -> _ Seq.:> storeID) -> Just storeID
                       _ -> Nothing
     in (prevChunk', (t, currCL'))

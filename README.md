@@ -7,17 +7,83 @@
 - Content-derived chunking for optimal de-duplication
 - Encryption (libsodium) and compression (LZ4)
 - Lock-free repository sharing and de-duplication across multiple machines
-- Multi-threaded chunk processing and upload
+- Multi-threaded chunk processing and upload *coming soon*
 - Property-based testing of core processing pipeline
-- Amazon S3 support
+- Amazon S3 support *coming soon*
 
 *WARNING: Currently under active development and not yet ready for use*
+
+## Quick start
+
+### Building
+
+Atavachron is a Haskell cabal project. It should be buildable by installing the latest GHC Haskell and invoking 'cabal install' from the git repository. For Nix users, there is a 'shell.nix' file included.
+
+### Initialising a repository
+
+To test atavachron, we can initialise a local filesystem repository:
+
+    $ atavachron init -r file:/home/tim/test-repo
+    Enter password:
+    Re-enter password:
+    Repository successfully created at file:/home/tim/test-repo
+
+### Backing up
+
+To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would use:
+
+    $ atavachron backup -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
+    Enter password:
+    Files: 36  |  Chunks: 40  |  Input: 53 MB  |  Output: 53 MB  |  Errors: 0
+    Wrote snapshot 107ee7fd
+
+### Listing
+
+To list all snapshots, we provide the command 'list' together with the '--snapshots' flag:
+
+    $ atavachron list --snapshots -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
+    Enter password:
+    107ee7fd | tim      | x1c      | /home/tim/Pictures/Wallpaper     | 2018-06-15 07:16 | 2018-06-15 07:16
+
+To list all files within a snapshot, we provide the command 'list' together with a snapshot ID.  We only need to specify enough of the snapshot ID to avoid ambiguity:
+
+    $ atavachron list 107 -r file:/home/tim/test-repo
+
+### Restoring
+
+Files from a snapshot can be selectively restored to a target directory on the local filesystem.
+
+    $ atavachron restore 107 -r file:/home/tim/test-repo -d /home/tim/tmp
+
+### Verifying
+
+Verification is similar to a restore. It will download all chunks from a repository and decode them, using cryptographic authentication to guarantee the integrity of each chunk, but it will not reconstitute the associated files to disk. It is used to test that the integrity of the data in the remote repository.
+
+    $ atavachron verify 107 -r file:/home/tim/test-repo
+
+
+## Repository structure
+
+The repository structure is common to all store back-ends. At the root of the repository there is an encrypted file 'manifest' which contains metadata such as the keys necessary to encrypt/decrypt/hash all chunks and snapshots. The chunks and snapshots are stored under their associated folders using content-derived keys. The 'keys' folder contains named access keys, which can be used to obtain the manifest encryption key and thus access to the repository, when combined with a matching password.
+
+    .
+    ├── chunks
+    │   ├── 0e
+    │   │   └── 0e15f4d3b47f32000be57d392f22c607b9cd8a8f92ad0df68d604f5f8543a4ac
+    │   └── 4f
+    │       └── 4f7fbb0cbec15377529ce2dc0dd2e3e9ebbd645f4312681a2de81ddee8099dc4
+    ├── keys
+    │   └── default
+    ├── manifest
+    └── snapshots
+        └── 83f992ba4df155eef874b4708799a1a03d0bd1954b25802ddeb497053a0cc745
+
 
 ## FAQ
 
 ### Why not just use DropBox?
 
-The important reasons for me, which apply to most consumer cloud storage offerings, are the cost of these services relative to Amazon S3, file count limits and the difficulty of integrating trustworthy client-side encryption. I also do not want bi-directional sync, which is a complex problem and difficult to get right. DropBox does offer online fine-grained incremental backup, sending changes to the cloud one file at a time. They also use de-duplication, but it is for their benefit only.
+The most important reason for me, which applies to most consumer cloud storage offerings, is the difficulty of integrating trustworthy client-side encryption. I also do not want bi-directional sync, which is a complex problem and difficult to get right. DropBox does offer online fine-grained incremental backup, sending changes to the cloud one file at a time. They also use de-duplication, but it is for their benefit only.
 Atavachron is a different point in the design space. In order to handle potentially huge amounts of files and maximise upload performance, it packs them into chunks. This also has the advantage of hiding the file sizes from the remote repository, which makes the encryption more secure. Atavachron backups are forever incremental, but there is potentially more cost in terms of storage space for each backup performed (depending on the chunk size chosen).
 
 ### Why not use an existing backup program for Amazon S3?
@@ -40,11 +106,11 @@ The chunks are then hashed using a secret key; and then, only if necessary, comp
 
 ### How secure is it?
 
-The highly regarded *Libsodium* provides the high-level APIs for use by cryptography non-experts such as myself. Atavachron hashes using HMAC-SHA512 and encrypts using an XSalsa20 stream cipher with Poly1305 MAC authentication.
+The highly regarded *Libsodium* provides the high-level APIs for use by cryptography non-experts such as myself. Atavachron hashes using HMAC-SHA512 and encrypts using an XSalsa20 stream cipher with Poly1305 MAC authentication. For passwords, Atavachron uses Scrypt to generate an *access key* from a password and random salt. This access key is used to encrypt the manifest key which unlocks the repository manifest and therefore all the data within the repository. The encrypted manifest key and password salt are written into the store under /keys/ using a label chosen by the user. This scheme supports multiple passwords to the repository and the possibility of revoking/changing a password.
 
 ### Why Haskell?
 
-Haskell offers a level of type-safety and expressiveness that is unmatched by most other practical languages. GHC Haskell is also capable of producing highly performant executables from very high-level abstract code. Atavachron has been written largely by composing transformations on effectful on-demand streams, resulting in better modularity and separation-of-concerns when compared to more traditional approaches. The high-level pipeline architecture should be visible in the source file "src/Atavachron/Pipelines.hs".
+Haskell offers a level of type-safety and expressiveness that is unmatched by most other practical languages. GHC Haskell is also capable of producing highly performant executables from very high-level abstract code. Atavachron has been written largely by composing transformations on effectful on-demand streams, resulting in better modularity and separation-of-concerns when compared to more traditional approaches. The high-level pipeline architecture should be visible in the source file [Pipelines.hs](https://github.com/willtim/Atavachron/blob/master/src/Atavachron/Pipelines.hs).
 
 ### What is property-based testing?
 

@@ -19,7 +19,7 @@ import           Data.Monoid
 import           Database.SQLite3 (Database, Statement, SQLData(..))
 import qualified Database.SQLite3 as SQL
 
-import Atavachron.Chunk.Process
+import Atavachron.Chunk.Encode
 
 data Connection = Connection
   { connDatabase   :: Database
