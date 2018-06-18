@@ -22,6 +22,7 @@ import Atavachron.Repository
 import Atavachron.Path
 import Atavachron.Chunk.Builder
 import Atavachron.Chunk.Encode
+import Atavachron.Streaming (TaskGroup)
 
 
  -- | Environment used during backup, verify and restore.
@@ -29,7 +30,8 @@ data Env params = Env
   { envRepository     :: Repository       -- ^ The remote destination repository.
   , envStartTime      :: !UTCTime         -- ^ Start time of current backup.
   , envRetries        :: !Int             -- ^ Number of times to retry failed gets and puts to the store.
---  , envTaskGroup      :: !TaskGroup       -- ^ Sized with the number of processing cores.
+  , envTaskBufferSize :: !Int             -- ^ Size of readahead for the stream, used for parallel processing.
+  , envTaskGroup      :: !TaskGroup       -- ^ Sized with the number of processing cores.
   , envCachePath      :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
   , envParams         :: params           -- ^ Task specific parameters.
   }

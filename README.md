@@ -7,7 +7,7 @@
 - Content-derived chunking for optimal de-duplication
 - Encryption (libsodium) and compression (LZ4)
 - Lock-free repository sharing and de-duplication across multiple machines
-- Multi-threaded chunk processing and upload *coming soon*
+- Multi-threaded chunk processing and upload
 - Property-based testing of core processing pipeline
 - Amazon S3 support *coming soon*
 

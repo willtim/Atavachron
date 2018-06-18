@@ -256,10 +256,12 @@ data Diff a b
   deriving (Functor, Show)
 
 diff :: MonadResource m
-     => Stream' (FileItem, ChunkList) m ()
-     -> Stream' FileItem m ()
-     -> Stream' (Diff (FileItem, ChunkList) FileItem) m ()
-diff = loop
+     => (old -> FileItem)
+     -> (new -> FileItem)
+     -> Stream' old m ()
+     -> Stream' new m ()
+     -> Stream' (Diff old new) m ()
+diff f g = loop
   where
     loop oldS newS = do
         old <- lift (next oldS)
@@ -269,11 +271,11 @@ diff = loop
             (Left{}, Right (y, ys)) -> insert y >> loop mempty ys
             (Right (x, xs), Left{}) -> delete x >> loop xs mempty
             (Right (x, xs), Right (y, ys))
-                | filePath' x == filePath y -> keepOrChange x y >> loop xs ys
+                | filePath1 x == filePath2 y -> keepOrChange x y >> loop xs ys
                   -- y must have been inserted in NEW, since y cannot follow x in OLD
-                | filePath' x >  filePath y -> insert y >> loop (S.cons x xs) ys
+                | filePath1 x >  filePath2 y -> insert y >> loop (S.cons x xs) ys
                   -- x must have been deleted in NEW, since y can only follow x in OLD
-                | filePath' x <  filePath y -> delete x >> loop xs (S.cons y ys)
+                | filePath1 x <  filePath2 y -> delete x >> loop xs (S.cons y ys)
                 | otherwise -> error "diff: Assertion failed"
 
     delete old = yield (Delete old)
@@ -281,11 +283,13 @@ diff = loop
     insert new = yield (Insert new)
 
     keepOrChange old new
-        | fileMTime' old == fileMTime new = yield (Keep old)
+        | fileMTime1 old == fileMTime2 new = yield (Keep old)
         | otherwise  = yield (Change new)
 
-    filePath'  = filePath  . fst
-    fileMTime' = fileMTime . fst
+    filePath1  = filePath  . f
+    fileMTime1 = fileMTime . f
+    filePath2  = filePath  . g
+    fileMTime2 = fileMTime . g
 
 patch :: forall m. MonadThrow m
       => Stream' (Diff FileItem FileItem) m ()

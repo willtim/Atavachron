@@ -16,6 +16,9 @@ import Control.Monad as M
 import Control.Monad.Base
 import Control.Monad.Trans.Resource
 
+import Control.Concurrent.Async
+import Control.Concurrent.QSem
+
 import Data.Either
 import Data.Function
 import Data.Maybe
@@ -31,6 +34,58 @@ type Stream' a m r = Stream (Of a) m r
 
 -- | A stream transformation
 type StreamF a b m r = Stream' a m r -> Stream' b m r
+
+-- | Represents a bounded group of concurrent tasks
+newtype TaskGroup = TaskGroup { getQSem :: QSem }
+
+-- | Create a new task group with the supplied maximum number
+-- of workers
+mkTaskGroup :: Int -> IO TaskGroup
+mkTaskGroup size = TaskGroup <$> newQSem size
+
+-- | Create a new async task using the supplied task group. The
+-- spawned task will be blocked if we have already reached the maximum
+-- number of concurrent tasks for this task group.
+asyncWithGroup :: TaskGroup -> IO a -> IO (Async a)
+asyncWithGroup (TaskGroup q) m = async (waitQSem q >> m <* signalQSem q)
+
+-- | A simple parMap that reads ahead creating async tasks.
+--
+-- NOTE: Since we force the effects using the supplied buffer size,
+-- the interleaving between output events and effects will be changed.
+-- This is especially important to consider when the governing monad
+-- is itself used to hold another stream of values which are interleaved
+-- with the supplied stream.
+parMap
+    :: MonadIO m
+    => Int          -- ^ read-ahead buffer size
+    -> TaskGroup    -- ^ available threads
+    -> (a -> IO b)
+    -> Stream' a m r
+    -> Stream' b m r
+parMap n g f
+    = S.mapM (liftIO . wait)
+    . evaluate n
+    . S.mapM (liftIO . asyncWithGroup g . f)
+
+-- | Evaluates the stream (forces the effects) ahead by @n@ items.
+evaluate :: forall a m r. Monad m => Int -> Stream' a m r -> Stream' a m r
+evaluate n = buffer mempty
+  where
+    buffer !buf str = do
+      e <- lift $ next str
+      case e of
+        Left r -> do
+          S.each buf -- yield remaining
+          return r
+        Right (a,rest) -> do
+          case Seq.viewl buf of
+            -- yield buffer head, only if buffer is full
+            a' Seq.:< _ | Seq.length buf >= n -> do
+              yield a'
+              buffer (Seq.drop 1 buf Seq.|> a) rest
+            _           ->
+              buffer (buf Seq.|> a) rest
 
 -- | maps over left values, leaving right values unchanged.
 left

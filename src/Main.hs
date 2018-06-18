@@ -26,6 +26,7 @@ optionsP = Options
     <> command "verify"  (info verifyOptionsP  ( progDesc "Verify the integrity of a snapshot and its files in the repository." ))
     <> command "restore" (info restoreOptionsP ( progDesc "Restore files from a snapshot to a target directory." ))
     <> command "list"    (info listOptionsP    ( progDesc "List snapshots and/or files." ))
+    <> command "diff"    (info diffOptionsP    ( progDesc "Diff two snapshots." ))
     -- <> command "help"   (info helpOptionsP   ( progDesc "Help for a particular command"))
     )
   <*> logLevelP
@@ -52,6 +53,9 @@ listOptionsP = CList <$> (ListOptions <$> repoUrlP <*> listArgP)
 
 listArgP :: Parser ListArgument
 listArgP = listSnapshotsP <|> listFilesP
+
+diffOptionsP :: Parser Command
+diffOptionsP = CDiff <$> (DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP)
 
 listSnapshotsP :: Parser ListArgument
 listSnapshotsP = flag' ListSnapshots
@@ -101,7 +105,7 @@ main = do
                ( fullDesc
                  <> header (unwords [ "Atavachron"
                                     , showVersion version
-                                    , "(c) 2018 Tim Williams"
+                                    , "© 2018 Tim Williams"
                                     ]))
     withStdoutLogging $ do
         setLogLevel (optLogLevel options)

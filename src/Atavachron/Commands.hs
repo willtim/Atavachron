@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -33,7 +34,7 @@ import Data.Time.Clock
 
 import qualified System.IO as IO
 
--- import GHC.Conc (numCapabilities)
+import GHC.Conc (numCapabilities)
 
 import Text.Printf
 
@@ -41,11 +42,13 @@ import System.FilePath.Glob
 import qualified System.Directory as Dir
 
 import Atavachron.Path
-import Atavachron.Tree
+import Atavachron.Tree (FileMeta(..), Diff(..))
+import qualified Atavachron.Tree as Tree
 import Atavachron.Repository (Repository(..), Snapshot(..), SnapshotName)
 import qualified Atavachron.Repository as Repository
 import Atavachron.Env
 import Atavachron.Pipelines
+import Atavachron.Streaming (mkTaskGroup)
 import qualified Atavachron.Streaming as S
 
 
@@ -55,6 +58,7 @@ data Command
   | CVerify  VerifyOptions
   | CRestore RestoreOptions
   | CList    ListOptions
+  | CDiff    DiffOptions
 --  | Help
 
 -- Wherefore art thou OverloadedRecordLabels?
@@ -90,12 +94,19 @@ data ListArgument
     | ListFiles SnapshotName
     -- | Keys
 
+data DiffOptions = DiffOptions
+    { dRepoURL     :: Text
+    , dSnapshotID1 :: Text
+    , dSnapshotID2 :: Text
+    }
+
 runCommand :: Command -> IO ()
 runCommand (CInit options)    = initialise options
 runCommand (CBackup options)  = backup options
 runCommand (CVerify options)  = verify options
 runCommand (CRestore options) = restore options
 runCommand (CList options)    = list options
+runCommand (CDiff options)    = diff options
 
 ------------------------------------------------------------
 
@@ -133,6 +144,26 @@ list ListOptions{..} = do
     case lArgument of
         ListSnapshots        -> listSnapshots lRepoURL
         ListFiles partialKey -> listFiles lRepoURL partialKey
+
+diff :: DiffOptions -> IO ()
+diff DiffOptions{..} = do
+    pass      <- askPassword
+    repo      <- Repository.resolveRepository dRepoURL pass
+    env       <- makeEnv (Restore (AbsDir mempty) allFiles) repo
+    snap1     <- getSnapshot repo dSnapshotID1
+    snap2     <- getSnapshot repo dSnapshotID2
+    runResourceT
+        . flip evalStateT initialProgress
+        . flip runReaderT env
+        . S.mapM_ (liftIO . printDiff)
+        $ Tree.diff fst fst (S.lefts $ snapshotTree snap1)
+                            (S.lefts $ snapshotTree snap2)
+  where
+    printDiff = \case
+        Keep   _        -> return () -- don't print
+        Insert (item,_) -> getFilePath (filePath item) >>= putStrLn . ("+ "<>)
+        Change (item,_) -> getFilePath (filePath item) >>= putStrLn . ("c "<>)
+        Delete (item,_) -> getFilePath (filePath item) >>= putStrLn . ("- "<>)
 
 listSnapshots :: Text -> IO ()
 listSnapshots repoURL = do
@@ -210,15 +241,19 @@ runRestore repo snapshot sourcePred targetDir = do
 -- TODO optionally read this from an Expresso config file?
 makeEnv :: p -> Repository -> IO (Env p)
 makeEnv params repo = do
+    debug' $ "Available cores: " <> T.pack (show numCapabilities)
     startT      <- getCurrentTime
---    taskGroup   <- mkTaskGroup numCapabilities
+    -- for now, a conservative size to minimise memory usage.
+    let taskBufferSize = numCapabilities
+    taskGroup   <- mkTaskGroup numCapabilities
     -- for now, default to XDG standard
     cachePath   <- fromMaybe (errorL' "Cannot parse XDG directory") . parseAbsDir
                        <$> Dir.getXdgDirectory Dir.XdgCache "atavachron"
     return Env
          { envRepository     = repo
          , envStartTime      = startT
---         , envTaskGroup      = taskGroup
+         , envTaskBufferSize = taskBufferSize
+         , envTaskGroup      = taskGroup
          , envRetries        = 5
          , envCachePath      = cachePath
          , envParams         = params
