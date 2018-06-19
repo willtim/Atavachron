@@ -114,7 +114,7 @@ initialise :: InitOptions -> IO ()
 initialise InitOptions{..} = do
     pass  <- newPassword
     void $ Repository.initRepository iRepoURL pass
-    T.hPutStrLn IO.stderr $ "Repository successfully created at " <> iRepoURL
+    T.hPutStrLn IO.stderr $ "Repository created at " <> iRepoURL
 
 backup :: BackupOptions -> IO ()
 backup BackupOptions{..} = do
@@ -122,6 +122,8 @@ backup BackupOptions{..} = do
     sourceDir <- parseAbsDir' bSourceDir
     repo      <- Repository.resolveRepository bRepoURL pass
     runBackup repo sourceDir
+    T.hPutStrLn IO.stderr $ "Backup complete."
+
 
 verify :: VerifyOptions -> IO ()
 verify VerifyOptions{..} = do
@@ -129,6 +131,7 @@ verify VerifyOptions{..} = do
     repo      <- Repository.resolveRepository vRepoURL pass
     snap      <- getSnapshot repo  vSnapshotID
     runVerify repo snap
+    T.hPutStrLn IO.stderr $ "Verification complete."
 
 restore :: RestoreOptions -> IO ()
 restore RestoreOptions{..} = do
@@ -138,6 +141,7 @@ restore RestoreOptions{..} = do
     snap      <- getSnapshot repo rSnapshotID
     let filePred = maybe allFiles parseGlob rIncludeGlob
     runRestore repo snap filePred targetDir
+    T.hPutStrLn IO.stderr $ "Restore complete."
 
 list :: ListOptions -> IO ()
 list ListOptions{..} = do

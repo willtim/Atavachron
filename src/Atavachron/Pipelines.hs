@@ -66,7 +66,7 @@ import Atavachron.Chunk.Encode
 import Atavachron.IO
 import Atavachron.Path
 
-import Atavachron.Streaming (Stream')
+import Atavachron.Streaming (Stream', StreamF)
 import qualified Atavachron.Streaming as S
 
 import Atavachron.Env
@@ -193,8 +193,8 @@ progressMonitor = S.mapM_ $ \_ -> do
 overFileItems
     :: Monad m
     => (b -> FileItem)
-    -> (Stream' a (Stream (Of OtherItem) m) r -> Stream' b (Stream (Of OtherItem) m) r)
-    -> (Stream' (Either a OtherItem) m r -> Stream' (Either b OtherItem) m r)
+    -> StreamF a b (Stream (Of OtherItem) m) r
+    -> StreamF (Either a OtherItem) (Either b OtherItem) m r
 overFileItems getFileItem f =
     S.reinterleaveRights fileElems otherElems . S.left f
   where
@@ -241,8 +241,7 @@ handleErrors = S.mapM $ \case
 -- and changes only.
 overChangedFiles
     :: forall c m r. Monad m
-    => (Stream' FileItem (Stream (Of (FileItem, c)) m) r
-          -> Stream' (FileItem, c) (Stream (Of (FileItem, c)) m) r)
+    => StreamF FileItem (FileItem, c) (Stream (Of (FileItem, c)) m) r
     -> Stream' (Diff (FileItem, c) FileItem) m r
     -> Stream' (FileItem, c) m r
 overChangedFiles f

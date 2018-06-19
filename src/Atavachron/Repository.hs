@@ -3,6 +3,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | A layer on top of the Store abstraction which provides functions
@@ -68,6 +69,7 @@ import Atavachron.Streaming
 import Atavachron.Store (Store, Key)
 import qualified Atavachron.Store as Store
 import qualified Atavachron.Store.LocalFS as Store
+import qualified Atavachron.Store.S3 as Store
 
 
 -- | Represents a remote repository used to backup files to.
@@ -373,11 +375,20 @@ putAccessKey store name = try . Store.put store (Store.Key keysPath name) . seri
 
 -- TODO
 parseURL :: Text -> IO (Either Text Store)
-parseURL repoDir = do
-    m'path <- return $ parseAbsDir $ T.unpack repoDir -- TODO parse the URL prefix first
-    return $ case m'path of
-        Just path -> Right $ Store.newLocalFS path
-        Nothing   -> Left $ "Cannot parse URL: " <> repoDir
+parseURL repoDir =
+    case ":" `T.breakOn` repoDir of
+        ("file", T.unpack -> _:rest) -> do
+            m'path <- return $ parseAbsDir rest
+            return $ case m'path of
+                Nothing   -> Left $ "Cannot parse file URL: " <> repoDir
+                Just path -> Right $ Store.newLocalFS path
+        ("s3", T.drop 1 -> rest)   ->
+            return $ case Store.parseS3URL rest of
+                Nothing   -> Left $ "Cannot parse S3 URL: " <> repoDir
+                Just (region, bucketName) -> Right $ Store.newS3Store region bucketName
+
+
+        _ -> return $ Left $ "Cannot parse URL: " <> repoDir
 
 deserialise' :: Serialise a => LB.ByteString -> Either SomeException a
 deserialise' = mapLeft toException . deserialiseOrFail

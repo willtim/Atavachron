@@ -9,9 +9,9 @@
 - Lock-free repository sharing and de-duplication across multiple machines
 - Multi-threaded chunk processing and upload
 - Property-based testing of core processing pipeline
-- Amazon S3 support *coming soon*
+- Amazon S3 support
 
-*WARNING: Currently under active development and not yet ready for use*
+*WARNING: Currently under active development and not yet ready for widespread use*
 
 ## Quick start
 
@@ -26,7 +26,7 @@ To test atavachron, we can initialise a local filesystem repository:
     $ atavachron init -r file:/home/tim/test-repo
     Enter password:
     Re-enter password:
-    Repository successfully created at file:/home/tim/test-repo
+    Repository created at file:/home/tim/test-repo
 
 ### Backing up
 
@@ -51,15 +51,21 @@ To list all files within a snapshot, we provide the command 'list' together with
 
 ### Restoring
 
-Files from a snapshot can be selectively restored to a target directory on the local filesystem.
+Files from a snapshot can be selectively restored to a target directory on the local filesystem. For example:
 
-    $ atavachron restore 107 -r file:/home/tim/test-repo -d /home/tim/tmp
+    $ atavachron restore 107 -r file:/home/tim/test-repo -i '**/*' -d /home/tim/tmp
 
 ### Verifying
 
 Verification is similar to a restore. It will download all chunks from a repository and decode them, using cryptographic authentication to guarantee the integrity of each chunk, but it will not reconstitute the associated files to disk. It is used to test that the integrity of the data in the remote repository.
 
     $ atavachron verify 107 -r file:/home/tim/test-repo
+
+### Backing up to Amazon S3
+
+To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional hostname and bucket. A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Currently the credentials must be provided in an ".s3cfg" configuration file.
+
+    $ atavachron backup -r s3:s3-eu-west-2.amazonaws.com/<bucket-name> -d /home/tim/Pictures
 
 
 ## Repository structure
@@ -88,7 +94,7 @@ Atavachron is a different point in the design space. In order to handle potentia
 
 ### Why not use an existing backup program for Amazon S3?
 
-They may be more appropriate in many cases. However, typically other backup programs are not *scalable*, which can be a problem for large amounts of data and machines with limited memory.
+They will be more appropriate in most cases. However, typically other backup programs are not *scalable*, which can be a problem for large amounts of data and machines with limited memory. Atavachron is GPL3 licensed and will also appeal to those who would rather hack and modify a Haskell program in preference to anything else.
 
 ### What exactly do you mean by scalable?
 

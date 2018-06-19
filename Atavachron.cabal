@@ -18,6 +18,7 @@ Library
                    saltine, direct-sqlite, optparse-applicative,
                    serialise, logging, lz4, hostname, lens,
                    amazonka, amazonka-s3, conduit, conduit-extra,
+                   http-types, attoparsec,
                    transformers-base, Glob, uri-encode, scrypt,
                    QuickCheck, tasty-quickcheck
   Exposed-Modules: Atavachron.Path
@@ -39,7 +40,8 @@ Library
                  , Atavachron.Chunk.Tests
 
 
-  ghc-options: -O2 -Wall -fwarn-tabs -funbox-strict-fields
+  ghc-options: -O2 -Wall -funbox-strict-fields
+               -fwarn-tabs
                -fno-warn-orphans
                -fno-warn-unused-do-bind
                -fno-warn-name-shadowing
@@ -56,6 +58,7 @@ Executable atavachron
                    saltine, direct-sqlite, optparse-applicative,
                    serialise, logging, lz4, hostname, lens,
                    amazonka, amazonka-s3, conduit, conduit-extra,
+                   http-types, attoparsec,
                    transformers-base, Glob, uri-encode, scrypt,
                    QuickCheck, tasty-quickcheck
   Other-Modules:   Atavachron.Path
@@ -77,7 +80,8 @@ Executable atavachron
                  , Paths_Atavachron
 
 
-  ghc-options: -O2 -threaded -rtsopts -Wall -fwarn-tabs -funbox-strict-fields
+  ghc-options: -O2 -threaded -rtsopts -with-rtsopts=-N -Wall -funbox-strict-fields
+               -fwarn-tabs
                -fno-warn-orphans
                -fno-warn-unused-do-bind
                -fno-warn-name-shadowing
