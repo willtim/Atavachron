@@ -52,7 +52,7 @@ listOptionsP :: Parser Command
 listOptionsP = CList <$> (ListOptions <$> repoUrlP <*> listArgP)
 
 listArgP :: Parser ListArgument
-listArgP = listSnapshotsP <|> listFilesP
+listArgP = listSnapshotsP <|> listAccessKeysP <|> listFilesP
 
 diffOptionsP :: Parser Command
 diffOptionsP = CDiff <$> (DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP)
@@ -61,6 +61,11 @@ listSnapshotsP :: Parser ListArgument
 listSnapshotsP = flag' ListSnapshots
   (  long "snapshots"
   <> help "List snapshots" )
+
+listAccessKeysP :: Parser ListArgument
+listAccessKeysP = flag' ListAccessKeys
+  (  long "keys"
+  <> help "List access keys" )
 
 listFilesP :: Parser ListArgument
 listFilesP = ListFiles <$> snapIdP

@@ -34,6 +34,7 @@ import Data.Function (on)
 import Data.Monoid
 
 import qualified Data.ByteString as B
+import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
 import Data.Time.Clock
@@ -416,15 +417,12 @@ commitFilesCache = do
         Left (ex :: SomeException) -> errorL' $ "Failed to update cache file: " <> (T.pack $ show ex)
         Right () -> return ()
 
-
 resolveCacheFileName
     :: (MonadReader (Env p) m, MonadIO m)
     => RawName
     -> m (Path Abs File)
-resolveCacheFileName name = ask >>= \Env{..} -> do
-    let dir = pushDir envCachePath (E.encodeUtf8 . URI.encodeText $ repoURL envRepository)
-    liftIO $ Dir.createDirectoryIfMissing True =<< getFilePath dir
-    return $ makeFilePath dir name
+resolveCacheFileName name = ask >>= \Env{..} ->
+    liftIO $ mkCacheFileName envCachePath (repoURL envRepository) name
 
 resolveCacheFileName'
     :: (MonadReader (Env p) m, MonadIO m)
@@ -432,6 +430,11 @@ resolveCacheFileName'
     -> m FilePath
 resolveCacheFileName' name = resolveCacheFileName name >>= liftIO . getFilePath
 
+mkCacheFileName :: Path Abs Dir -> Text -> RawName -> IO (Path Abs File)
+mkCacheFileName cachePath repoURL name = do
+    let dir = pushDir cachePath (E.encodeUtf8 $ URI.encodeText repoURL)
+    Dir.createDirectoryIfMissing True =<< getFilePath dir
+    return $ makeFilePath dir name
 
 -- | Group tagged-offsets and store IDs into distinct ChunkList per tag.
 packChunkLists

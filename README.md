@@ -26,6 +26,7 @@ To test atavachron, we can initialise a local filesystem repository:
     $ atavachron init -r file:/home/tim/test-repo
     Enter password:
     Re-enter password:
+    Credentials cached at /home/tim/.cache/atavachron/%2Fhome%2Ftim%2Ftest-repo/credentials
     Repository created at file:/home/tim/test-repo
 
 ### Backing up
@@ -33,7 +34,6 @@ To test atavachron, we can initialise a local filesystem repository:
 To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would use:
 
     $ atavachron backup -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
-    Enter password:
     Files: 36  |  Chunks: 40  |  Input: 53 MB  |  Output: 53 MB  |  Errors: 0
     Wrote snapshot 107ee7fd
 
@@ -42,7 +42,6 @@ To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would
 To list all snapshots, we provide the command 'list' together with the '--snapshots' flag:
 
     $ atavachron list --snapshots -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
-    Enter password:
     107ee7fd | tim      | x1c      | /home/tim/Pictures/Wallpaper     | 2018-06-15 07:16 | 2018-06-15 07:16
 
 To list all files within a snapshot, we provide the command 'list' together with a snapshot ID.  We only need to specify enough of the snapshot ID to avoid ambiguity:
@@ -94,7 +93,7 @@ Atavachron is a different point in the design space. In order to handle potentia
 
 ### Why not use an existing backup program for Amazon S3?
 
-They will be more appropriate in most cases. However, typically other backup programs are not *scalable*, which can be a problem for large amounts of data and machines with limited memory. Atavachron is GPL3 licensed and will also appeal to those who would rather hack and modify a Haskell program in preference to anything else.
+They will be more appropriate in most cases. However, typically other backup programs are not *scalable*, which can be a problem for large amounts of data and machines with limited memory. Atavachron is GPL3 licensed and will also appeal to those who would rather hack and modify a Haskell program in preference to anything else (which include me!).
 
 ### What exactly do you mean by scalable?
 

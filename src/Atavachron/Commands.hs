@@ -18,6 +18,8 @@ module Atavachron.Commands where
 
 import Prelude hiding (concatMap)
 
+import Codec.Serialise
+
 import Control.Exception
 import Control.Logging
 import Control.Monad
@@ -25,6 +27,7 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans.Resource
 
+import qualified Data.ByteString.Lazy as LB
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text)
@@ -40,11 +43,12 @@ import Text.Printf
 
 import System.FilePath.Glob
 import qualified System.Directory as Dir
+import qualified System.Posix.Files as Files
 
 import Atavachron.Path
 import Atavachron.Tree (FileMeta(..), Diff(..))
 import qualified Atavachron.Tree as Tree
-import Atavachron.Repository (Repository(..), Snapshot(..), SnapshotName)
+import Atavachron.Repository (Repository(..), Snapshot(..), SnapshotName, CachedCredentials)
 import qualified Atavachron.Repository as Repository
 import Atavachron.Env
 import Atavachron.Pipelines
@@ -91,8 +95,8 @@ data ListOptions = ListOptions
 
 data ListArgument
     = ListSnapshots
+    | ListAccessKeys
     | ListFiles SnapshotName
-    -- | Keys
 
 data DiffOptions = DiffOptions
     { dRepoURL     :: Text
@@ -112,47 +116,44 @@ runCommand (CDiff options)    = diff options
 
 initialise :: InitOptions -> IO ()
 initialise InitOptions{..} = do
-    pass  <- newPassword
-    void $ Repository.initRepository iRepoURL pass
-    T.hPutStrLn IO.stderr $ "Repository created at " <> iRepoURL
+    pass <- newPassword
+    cc   <- Repository.initRepository iRepoURL pass
+    saveCredentials iRepoURL cc
+    T.putStrLn $ "Repository created at " <> iRepoURL
 
 backup :: BackupOptions -> IO ()
 backup BackupOptions{..} = do
-    pass      <- askPassword
     sourceDir <- parseAbsDir' bSourceDir
-    repo      <- Repository.resolveRepository bRepoURL pass
+    repo      <- authenticate bRepoURL
     runBackup repo sourceDir
-    T.hPutStrLn IO.stderr $ "Backup complete."
-
+    T.putStrLn $ "Backup complete."
 
 verify :: VerifyOptions -> IO ()
 verify VerifyOptions{..} = do
-    pass      <- askPassword
-    repo      <- Repository.resolveRepository vRepoURL pass
+    repo      <- authenticate vRepoURL
     snap      <- getSnapshot repo  vSnapshotID
     runVerify repo snap
-    T.hPutStrLn IO.stderr $ "Verification complete."
+    T.putStrLn $ "Verification complete."
 
 restore :: RestoreOptions -> IO ()
 restore RestoreOptions{..} = do
-    pass      <- askPassword
     targetDir <- parseAbsDir' rTargetDir
-    repo      <- Repository.resolveRepository rRepoURL pass
+    repo      <- authenticate rRepoURL
     snap      <- getSnapshot repo rSnapshotID
     let filePred = maybe allFiles parseGlob rIncludeGlob
     runRestore repo snap filePred targetDir
-    T.hPutStrLn IO.stderr $ "Restore complete."
+    T.putStrLn $ "Restore complete."
 
 list :: ListOptions -> IO ()
 list ListOptions{..} = do
     case lArgument of
         ListSnapshots        -> listSnapshots lRepoURL
+        ListAccessKeys       -> listAccessKeys lRepoURL
         ListFiles partialKey -> listFiles lRepoURL partialKey
 
 diff :: DiffOptions -> IO ()
 diff DiffOptions{..} = do
-    pass      <- askPassword
-    repo      <- Repository.resolveRepository dRepoURL pass
+    repo      <- authenticate dRepoURL
     env       <- makeEnv (Restore (AbsDir mempty) allFiles) repo
     snap1     <- getSnapshot repo dSnapshotID1
     snap2     <- getSnapshot repo dSnapshotID2
@@ -171,8 +172,7 @@ diff DiffOptions{..} = do
 
 listSnapshots :: Text -> IO ()
 listSnapshots repoURL = do
-    pass      <- askPassword
-    repo      <- Repository.resolveRepository repoURL pass
+    repo      <- authenticate repoURL
     flip S.mapM_ (Repository.listSnapshots repo) $ \(key, e'snap) ->
         case e'snap of
             Left ex            ->
@@ -187,10 +187,14 @@ listSnapshots repoURL = do
                        (show sStartTime)
                        (show sFinishTime)
 
+listAccessKeys :: Text -> IO ()
+listAccessKeys repoURL = do
+    repo      <- authenticate repoURL
+    S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
+
 listFiles :: Text -> SnapshotName -> IO ()
 listFiles repoURL partialKey = do
-    pass <- askPassword
-    repo <- Repository.resolveRepository repoURL pass
+    repo <- authenticate repoURL
     env  <- makeEnv (Restore (AbsDir mempty) allFiles) repo
     snap <- liftIO $ getSnapshot repo partialKey
     runResourceT
@@ -242,17 +246,49 @@ runRestore repo snapshot sourcePred targetDir = do
         . flip runReaderT env
         $ restoreFiles snapshot
 
+authenticate :: Text -> IO Repository
+authenticate repoURL = do
+    -- check for cached credentials
+    m'cc <- loadCredentials repoURL
+    case m'cc of
+        Nothing -> newCredentials repoURL
+        Just cc -> Repository.authenticate' repoURL cc
+
+newCredentials :: Text -> IO Repository
+newCredentials repoURL = do
+    pass       <- askPassword
+    (repo, cc) <- Repository.authenticate repoURL pass
+    repo <$ saveCredentials repoURL cc
+
+loadCredentials :: Text -> IO (Maybe CachedCredentials)
+loadCredentials repoURL = do
+    cachePath <- getCachePath
+    filePath  <- mkCacheFileName cachePath repoURL "credentials" >>= getFilePath
+    exists    <- Files.fileExist filePath
+    if exists
+        then do debug' $ "Using cached credentials."
+                Just . deserialise <$> LB.readFile filePath
+        else    return Nothing
+
+saveCredentials :: Text -> CachedCredentials -> IO ()
+saveCredentials repoURL cc = do
+    cachePath <- getCachePath
+    filePath  <- mkCacheFileName cachePath repoURL "credentials" >>= getFilePath
+    LB.writeFile filePath (serialise cc)
+    Files.setFileMode filePath (Files.ownerReadMode `Files.unionFileModes` Files.ownerWriteMode)
+    T.putStrLn $ "Credentials cached at " <> T.pack filePath
+
 -- TODO optionally read this from an Expresso config file?
 makeEnv :: p -> Repository -> IO (Env p)
 makeEnv params repo = do
     debug' $ "Available cores: " <> T.pack (show numCapabilities)
     startT      <- getCurrentTime
+
     -- for now, a conservative size to minimise memory usage.
     let taskBufferSize = numCapabilities
+
     taskGroup   <- mkTaskGroup numCapabilities
-    -- for now, default to XDG standard
-    cachePath   <- fromMaybe (errorL' "Cannot parse XDG directory") . parseAbsDir
-                       <$> Dir.getXdgDirectory Dir.XdgCache "atavachron"
+    cachePath   <- getCachePath
     return Env
          { envRepository     = repo
          , envStartTime      = startT
@@ -262,6 +298,12 @@ makeEnv params repo = do
          , envCachePath      = cachePath
          , envParams         = params
          }
+
+-- | For now, default to XDG standard
+getCachePath :: IO (Path Abs Dir)
+getCachePath =
+    fromMaybe (errorL' "Cannot parse XDG directory") . parseAbsDir
+        <$> Dir.getXdgDirectory Dir.XdgCache "atavachron"
 
 -- | Logs and throws, if it cannot parse the path.
 parseAbsDir' :: Text -> IO (Path Abs Dir)

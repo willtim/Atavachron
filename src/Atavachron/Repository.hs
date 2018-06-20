@@ -20,6 +20,7 @@ module Atavachron.Repository
     , ManifestKey(..)
     , AccessKeyName
     , AccessKey(..)
+    , CachedCredentials
       -- * Functions
     , newManifest
     , putChunk
@@ -28,7 +29,8 @@ module Atavachron.Repository
     , getSnapshot
     , putSnapshot
     , initRepository
-    , resolveRepository
+    , authenticate
+    , authenticate'
     , listAccessKeys
     , getAccessKey
     , putAccessKey
@@ -168,6 +170,13 @@ instance Serialise Scrypt.Salt where
 
 type AccessKeyName = Text
 
+data CachedCredentials = CachedCredentials
+  { ccPasswordHash  :: !SecretBox.Key
+  , ccAccessKeyName :: !AccessKeyName
+  } deriving Generic
+
+instance Serialise CachedCredentials
+
 data SnapshotNotFound = SnapshotNotFound SnapshotName
     deriving Show
 instance Exception SnapshotNotFound
@@ -280,7 +289,7 @@ putSnapshot repo snapshot = do
     return $ const (Store.kName key) <$> res
 
 -- | Initialise a repository using the supplied URL and password.
-initRepository :: Text -> Text -> IO Repository
+initRepository :: Text -> Text -> IO CachedCredentials
 initRepository repoURL pass = do
     store       <- either (errorL' . ("Cannot parse URL: "<>)) id <$> parseURL repoURL
     hasManifest <- Store.hasKey store manifestStoreKey
@@ -297,54 +306,66 @@ initRepository repoURL pass = do
                >>= try . Store.put store manifestStoreKey . serialise)
 
     salt <- Scrypt.newSalt
-    let key = keyFromPassword salt pass
+    let key  = keyFromPassword salt pass
+        name = "default"
     ciphertext <- encryptBytes key (Saltine.encode $ unManifestKey manifestKey)
 
     either (\(ex :: SomeException) -> errorL' $ "Could not write access key: " <> T.pack (show ex)) id
-        <$> putAccessKey store "default" (AccessKey salt ciphertext)
+        <$> putAccessKey store name (AccessKey salt ciphertext)
 
-    return $ Repository
-        { repoURL      = repoURL
-        , repoStore    = store
-        , repoManifest = manifest
-        }
+    return $ CachedCredentials key name
 
--- | Resolve a repository handle using the supplied URL and password.
--- TODO support cached credentials
-resolveRepository :: Text -> Text -> IO Repository
-resolveRepository repoURL pass = do
-
+-- | Get repository access using the supplied password.
+authenticate :: Text -> Text -> IO (Repository, CachedCredentials)
+authenticate  repoURL pass = do
     store    <- either (errorL' . ("Cannot parse URL: "<>)) id
                    <$> parseURL repoURL
-
     -- for now, just try each key in succession
     let keyStr = listAccessKeys store
-    res <- S.foldM_ tryPass (return Nothing) return keyStr
-    case res of
-        Nothing          -> errorL' "Password does not match any stored!"
-        Just manifestKey -> do
-            manifest <- either (\ex -> errorL' $ "Cannot retrieve manifest: " <> T.pack (show ex)) id
-                     . (>>= decrypt (unManifestKey manifestKey) (toException ManifestDecryptFailed))
-                   <$> try (Store.get store manifestStoreKey)
-            return Repository
-                { repoURL      = repoURL
-                , repoStore    = store
-                , repoManifest = manifest
-                }
+    (manifestKey, cc) <- fromMaybe (errorL' "Password does not match any stored!")
+               <$> S.foldM_ tryPass (return Nothing) return keyStr
+    (,cc) <$> resolveRepository repoURL store manifestKey
 
   where
-    tryPass :: Maybe ManifestKey
+    tryPass :: Maybe (ManifestKey, CachedCredentials)
             -> (AccessKeyName, Either SomeException AccessKey)
-            -> IO (Maybe ManifestKey)
+            -> IO (Maybe (ManifestKey, CachedCredentials))
     tryPass Nothing (name, Left ex) = do
         warn' $ "Could not retrieve key '" <> name <> "' : " <> T.pack (show ex)
         return Nothing
     tryPass Nothing (name, Right AccessKey{..}) = do
         debug' $ "Trying key: " <> name
         let key = keyFromPassword akSalt pass
-        return $ ManifestKey
+            cc  = CachedCredentials key name
+        return $ (,cc) . ManifestKey
              <$> (decryptBytes key akManifestKey >>= Saltine.decode)
     tryPass m _ = return m
+
+-- | Get repository access using the supplied cached credentials.
+authenticate' :: Text -> CachedCredentials -> IO Repository
+authenticate' repoURL CachedCredentials{..} = do
+    store    <- either (errorL' . ("Cannot parse URL: "<>)) id
+                   <$> parseURL repoURL
+    res      <- getAccessKey store ccAccessKeyName
+    case res of
+        Left ex -> errorL $ "Could not retrieve access key: " <> T.pack (show ex)
+        Right AccessKey{..} -> do
+            let manifestKey = maybe (errorL $ "Cached credentials do not match access key: " <> ccAccessKeyName)
+                                    ManifestKey
+                            $ (decryptBytes ccPasswordHash akManifestKey >>= Saltine.decode)
+            resolveRepository repoURL store manifestKey
+
+-- Loads and decodes the Manifest
+resolveRepository :: Text -> Store -> ManifestKey -> IO Repository
+resolveRepository repoURL store manifestKey = do
+    manifest <- either (\ex -> errorL' $ "Cannot obtain manifest: " <> T.pack (show ex)) id
+                     . (>>= decrypt (unManifestKey manifestKey) (toException ManifestDecryptFailed))
+                   <$> try (Store.get store manifestStoreKey)
+    return Repository
+        { repoURL      = repoURL
+        , repoStore    = store
+        , repoManifest = manifest
+        }
 
 keyFromPassword :: Scrypt.Salt -> Text -> SecretBox.Key
 keyFromPassword salt pass = key
