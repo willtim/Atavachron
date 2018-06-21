@@ -21,12 +21,13 @@ data Options = Options
 optionsP :: Parser Options
 optionsP = Options
   <$> subparser
-    (  command "init"    (info initOptionsP   ( progDesc "Initialise a new repository." ))
+    (  command "init"    (info initOptionsP    ( progDesc "Initialise a new repository." ))
     <> command "backup"  (info backupOptionsP  ( progDesc "Create and upload a new snapshot to the repository." ))
     <> command "verify"  (info verifyOptionsP  ( progDesc "Verify the integrity of a snapshot and its files in the repository." ))
     <> command "restore" (info restoreOptionsP ( progDesc "Restore files from a snapshot to a target directory." ))
-    <> command "list"    (info listOptionsP    ( progDesc "List snapshots and/or files." ))
+    <> command "list"    (info listOptionsP    ( progDesc "List snapshots, files or access keys." ))
     <> command "diff"    (info diffOptionsP    ( progDesc "Diff two snapshots." ))
+    <> command "keys"    (info keyOptionsP     ( progDesc "Management of password-protected access keys."))
     -- <> command "help"   (info helpOptionsP   ( progDesc "Help for a particular command"))
     )
   <*> logLevelP
@@ -57,6 +58,12 @@ listArgP = listSnapshotsP <|> listAccessKeysP <|> listFilesP
 diffOptionsP :: Parser Command
 diffOptionsP = CDiff <$> (DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP)
 
+keyOptionsP :: Parser Command
+keyOptionsP = CKeys <$> (KeyOptions <$> repoUrlP <*> keysArgP)
+
+keysArgP :: Parser KeysArgument
+keysArgP = addKeyP
+
 listSnapshotsP :: Parser ListArgument
 listSnapshotsP = flag' ListSnapshots
   (  long "snapshots"
@@ -69,6 +76,12 @@ listAccessKeysP = flag' ListAccessKeys
 
 listFilesP :: Parser ListArgument
 listFilesP = ListFiles <$> snapIdP
+
+addKeyP :: Parser KeysArgument
+addKeyP = AddKey <$> strOption
+  (  long "add"
+  <> metavar "NAME"
+  <> help "Add access key" )
 
 sourceDirP :: Parser Text
 sourceDirP = strOption

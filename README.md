@@ -60,6 +60,14 @@ Verification is similar to a restore. It will download all chunks from a reposit
 
     $ atavachron verify 107 -r file:/home/tim/test-repo
 
+### Add an additional access key
+
+To create an additional access key with its own password, use the following:
+
+    $ atavachron keys --add karen -r file:/home/tim/test-repo
+
+Note that currently keys can only be revoked by deleting them manually from the Store, e.g. by using the Amazon S3 dashboard.
+
 ### Backing up to Amazon S3
 
 To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional hostname and bucket. A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Currently the credentials must be provided in an ".s3cfg" configuration file.

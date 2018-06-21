@@ -63,6 +63,7 @@ data Command
   | CRestore RestoreOptions
   | CList    ListOptions
   | CDiff    DiffOptions
+  | CKeys    KeyOptions
 --  | Help
 
 -- Wherefore art thou OverloadedRecordLabels?
@@ -104,6 +105,14 @@ data DiffOptions = DiffOptions
     , dSnapshotID2 :: Text
     }
 
+data KeyOptions = KeyOptions
+    { kRepoURL     :: Text
+    , kArgument    :: KeysArgument
+    }
+
+data KeysArgument
+    = AddKey Text
+
 runCommand :: Command -> IO ()
 runCommand (CInit options)    = initialise options
 runCommand (CBackup options)  = backup options
@@ -111,6 +120,7 @@ runCommand (CVerify options)  = verify options
 runCommand (CRestore options) = restore options
 runCommand (CList options)    = list options
 runCommand (CDiff options)    = diff options
+runCommand (CKeys options)    = keys options
 
 ------------------------------------------------------------
 
@@ -170,6 +180,11 @@ diff DiffOptions{..} = do
         Change (item,_) -> getFilePath (filePath item) >>= putStrLn . ("c "<>)
         Delete (item,_) -> getFilePath (filePath item) >>= putStrLn . ("- "<>)
 
+keys :: KeyOptions -> IO ()
+keys KeyOptions{..} =
+    case kArgument of
+        AddKey name -> addAccessKey kRepoURL name
+
 listSnapshots :: Text -> IO ()
 listSnapshots repoURL = do
     repo      <- authenticate repoURL
@@ -207,6 +222,15 @@ listFiles repoURL partialKey = do
     printFile item = do
         fp <- getFilePath (filePath item)
         putStrLn fp
+
+addAccessKey :: Text -> Text -> IO ()
+addAccessKey repoURL name = do
+    T.putStrLn "Checking existing credentials."
+    repo <- authenticate repoURL
+    T.putStrLn "Please provide the additional credentials."
+    pass <- newPassword
+    cc   <- Repository.newAccessKey (repoStore repo) (repoManifestKey repo) name pass
+    saveCredentials repoURL cc
 
 runBackup :: Repository -> Path Abs Dir -> IO ()
 runBackup repo sourceDir = do

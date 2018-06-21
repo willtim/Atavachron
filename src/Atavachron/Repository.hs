@@ -17,12 +17,13 @@ module Atavachron.Repository
     , Snapshot(..)
     , SnapshotName
     , ChunkList(..)
-    , ManifestKey(..)
     , AccessKeyName
     , AccessKey(..)
     , CachedCredentials
+    , ManifestKey
       -- * Functions
     , newManifest
+    , newAccessKey
     , putChunk
     , getChunk
     , listSnapshots
@@ -77,17 +78,17 @@ import qualified Atavachron.Store.S3 as Store
 -- | Represents a remote repository used to backup files to.
 -- A repository must be initialised before use.
 data Repository = Repository
-  { repoURL      :: !Text        -- ^ The repository URL
-  , repoStore    :: !Store.Store -- ^ The Store implementation to use.
-  , repoManifest :: !Manifest
+  { repoURL         :: !Text        -- ^ The repository URL
+  , repoStore       :: !Store.Store -- ^ The Store implementation to use.
+  , repoManifestKey :: !ManifestKey -- ^ The master key used to decrypt the manifest.
+  , repoManifest    :: !Manifest    -- ^ The metadata needed for encoding/decoding chunks.
   }
 
 -- | A repository manifest file contains the keys and CDC parameters
 -- needed to both decode existing snapshots and create new ones with
 -- de-duplication. A manifest is associated with one remote URL and
 -- stored at "/manifest". It is encrypted using a named master key
--- stored in "/keys" which is itself encrypted using public-key
--- cryptography.
+-- stored in "/keys" which is itself encrypted using a password.
 data Manifest = Manifest
   { mVersion    :: !Int -- expected to be "1" currently
   , mChunkKey   :: !ChunkKey
@@ -304,15 +305,17 @@ initRepository repoURL pass = do
     either (\(ex :: SomeException) -> errorL' $ "Failed to initialise repository: " <> T.pack (show ex)) id
         <$> (encryptBytes (unManifestKey manifestKey) pickled
                >>= try . Store.put store manifestStoreKey . serialise)
+    newAccessKey store manifestKey "default" pass
 
+
+-- | Create and store a new access key using the supplied name and password.
+newAccessKey :: Store -> ManifestKey -> Text -> Text -> IO CachedCredentials
+newAccessKey store manifestKey name pass = do
     salt <- Scrypt.newSalt
     let key  = keyFromPassword salt pass
-        name = "default"
     ciphertext <- encryptBytes key (Saltine.encode $ unManifestKey manifestKey)
-
     either (\(ex :: SomeException) -> errorL' $ "Could not write access key: " <> T.pack (show ex)) id
         <$> putAccessKey store name (AccessKey salt ciphertext)
-
     return $ CachedCredentials key name
 
 -- | Get repository access using the supplied password.
@@ -362,9 +365,10 @@ resolveRepository repoURL store manifestKey = do
                      . (>>= decrypt (unManifestKey manifestKey) (toException ManifestDecryptFailed))
                    <$> try (Store.get store manifestStoreKey)
     return Repository
-        { repoURL      = repoURL
-        , repoStore    = store
-        , repoManifest = manifest
+        { repoURL         = repoURL
+        , repoStore       = store
+        , repoManifestKey = manifestKey
+        , repoManifest    = manifest
         }
 
 keyFromPassword :: Scrypt.Salt -> Text -> SecretBox.Key
