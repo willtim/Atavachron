@@ -33,6 +33,8 @@ import Data.Function (on)
 import Data.Monoid
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Builder as Builder
+import qualified Data.ByteString.Lazy as LB
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
@@ -181,13 +183,13 @@ progressMonitor = S.mapM_ $ \_ -> do
     startT       <- asks envStartTime
     nowT         <- liftIO getCurrentTime
     putProgress $ unwords $ List.intersperse " | "
-        [ "Files: "        ++ show _prFiles
-        , "Chunks: "       ++ show _prChunks
-        , "Input: "        ++ show (_prInputSize  `div` megabyte) ++ " MB"
-        , "Deduplicated: " ++ show (_prDedupSize  `div` megabyte) ++ " MB"
-        , "Output: "       ++ show (_prStoredSize `div` megabyte) ++ " MB"
-        , "Rate: "         ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
-        , "Errors: "       ++ show (_prErrors)
+        [ "Files: "         ++ show _prFiles
+        , "Chunks: "        ++ show _prChunks
+        , "In: "            ++ show (_prInputSize  `div` megabyte) ++ " MB"
+        , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
+        , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
+        , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
+        , "Errors: "        ++ show (_prErrors)
         ]
   where
     putProgress s = liftIO $ hPutStr stderr $ "\r\ESC[K" ++ s
@@ -413,18 +415,23 @@ readFilesCache
   :: (MonadReader (Env Backup) m, MonadResource m)
   => Stream' (FileItem, ChunkList) m ()
 readFilesCache = do
-    cacheFile <- resolveCacheFileName "files"
+    cacheFile <- getFilesCacheName >>= resolveCacheFileName
     sourceDir <- asks $ bSourceDir . envParams
     S.map (ceFileItem &&& ceChunkList)
         . absolutePaths sourceDir
         $ readCacheFile cacheFile
 
 
+getFilesCacheName :: MonadReader (Env Backup) m => m RawName
+getFilesCacheName = do
+    name  <- Builder.toLazyByteString . Builder.byteStringHex . getRawFilePath <$> asks (bSourceDir . envParams)
+    return $ "files-" <> LB.toStrict name
+
 -- NOTE: We only commit updates to the file cache if the entire backup completes.
-commitFilesCache :: (MonadIO m, MonadCatch m, MonadReader (Env p) m) => m ()
+commitFilesCache :: (MonadIO m, MonadCatch m, MonadReader (Env Backup) m) => m ()
 commitFilesCache = do
     cacheFile  <- resolveCacheFileName' "files.tmp"
-    cacheFile' <- resolveCacheFileName' "files"
+    cacheFile' <- getFilesCacheName >>= resolveCacheFileName'
     res <- try $ liftIO $ Dir.renameFile cacheFile cacheFile'
     case res of
         Left (ex :: SomeException) -> errorL' $ "Failed to update cache file: " <> (T.pack $ show ex)
