@@ -26,6 +26,9 @@ module Atavachron.Chunk.CDC
     , newCDCKey
     , defaultCDCParams
     , rechunkCDC
+    , split
+    , slowSplit
+    , genHVs
     ) where
 
 import Control.Monad.State
@@ -129,18 +132,20 @@ rechunkCDC cdcKey CDCParams{..} = loop mempty Nothing
 -- * If we fail to split the supplied bytestring, we return the
 --   the whole lot and an empty remainder. Hence the supplied bytestring
 --   should be our maximum chunk size.
-split :: Vector Hash -- ^ Table of random hash values for each Word8
-      -> Int         -- ^ window size
-      -> Int         -- ^ minimum output chunk size in bytes
-      -> Int         -- ^ log2 of desired average output chunk size
-      -> B.ByteString
-      -> (B.ByteString, B.ByteString)
+split
+    :: Vector Hash -- ^ Table of random hash values for each Word8
+    -> Int         -- ^ window size
+    -> Int         -- ^ minimum output chunk size in bytes
+    -> Int         -- ^ log2 of desired average output chunk size
+    -> B.ByteString
+    -> (B.ByteString, B.ByteString)
 split hvs winSize minSize log2AvgSize bs
     | winSize > minSize = error "Assertion failed: winSize > minSize"
-    | B.length bs <= winSize = (B.empty, bs)
+    | B.length bs < minSize = (B.empty, bs)
     | otherwise =
-      let start = winSize - 1
-      in loop start $ initHash hvs $ B.unsafeTake start bs
+      loop 0
+         $ initHash hvs
+         $ B.unsafeTake winSize bs
   where
     loop !start !_hash
         | start >= end = (bs, B.empty)
@@ -155,6 +160,31 @@ split hvs winSize minSize log2AvgSize bs
 
     mask    = shiftL 1 log2AvgSize - 1
     end     = B.length bs - winSize
+
+-- | Computes the same as 'split' using only 'initHash' (and is therefore very slow).
+-- Used by the QuickCheck tests.
+slowSplit
+    :: Vector Word64
+    -> Int         -- ^ window size
+    -> Int         -- ^ minimum output chunk size in bytes
+    -> Int         -- ^ log2 of desired average output chunk size
+    -> B.ByteString
+    -> (B.ByteString, B.ByteString)
+slowSplit _hvs _winSize minSize _log2AvgSize bs
+    | B.length bs < minSize = (mempty, bs)
+slowSplit hvs winSize minSize log2AvgSize bs = loop 0
+  where
+    loop !start =
+        let !bs'  = B.take winSize $ B.drop start bs
+            !hash = initHash hvs bs'
+            !i    = start + winSize
+        in case () of
+            _ | B.length bs' < winSize   -> (bs, B.empty)
+              | mask == (mask .&. hash)
+                && i >= minSize          -> B.splitAt i bs
+              | otherwise                -> loop (start+1)
+
+    mask = shiftL 1 log2AvgSize - 1
 
 updateHash :: Vector Hash -> Int -> Word8 -> Word8 -> Hash -> Hash
 updateHash !hvs !winSize !old8 !new8 !hash =

@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -39,14 +40,32 @@ import Atavachron.Streaming
 main :: IO ()
 main = do
     sodiumInit
-    quickCheck prop_inverse
+    quickCheck prop_chunking_inverse
+    quickCheck prop_cdc_slow_eq_fast
 -- chunkTests = testProperties "Chunking tests" $
 --   [
 --   ]
 
+prop_cdc_slow_eq_fast :: Property
+prop_cdc_slow_eq_fast =
+    forAll (choose (1, 64)) $ \(cpWinSize :: Int) ->
+    forAll (choose (0, 21)
+        `suchThat` (\i -> shiftL 1 i >= cpWinSize)) $ \(cpLog2MinSize :: Int) ->
+    forAll (choose (1, 22)
+        `suchThat` (>=cpLog2MinSize)) $ \(cpLog2AvgSize :: Int) ->
+
+    forAll (genPrintableByteString 0 512) $ \(bs :: B.ByteString) ->
+
+    withMaxSuccess 1000 $ monadicIO $ do
+        cdcKey <- run newCDCKey
+        let hvs     = genHVs cdcKey
+            minSize = shiftL 1 cpLog2MinSize
+        assert $ split hvs cpWinSize minSize cpLog2AvgSize bs
+              == slowSplit hvs cpWinSize minSize cpLog2AvgSize bs
+
 -- | Test the core chunk processing functions
-prop_inverse :: Property
-prop_inverse =
+prop_chunking_inverse :: Property
+prop_chunking_inverse =
     forAll (choose (1, 64)) $ \(cpWinSize :: Int) ->
     forAll (choose (0, 21)
         `suchThat` (\i -> shiftL 1 i >= cpWinSize)) $ \(cpLog2MinSize :: Int) ->
