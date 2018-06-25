@@ -225,18 +225,19 @@ getChunk Repository{..} storeID = do
        Right False -> return (Left $ toException $ MissingObject key)
        Left ex     -> return $ Left ex
 
- -- | Put the chunk under the supplied content-derived key, if no existing entry present.
+-- | Put the chunk under the supplied content-derived key, if no existing entry present.
+-- Returns true if the chunk was already present in the repository.
 -- NOTE: The last port of call for deduplication is here. The repository may have been
 -- updated by another machine and so we first need to check if there is already an entry for the
 -- supplied key before performing the write.
-putChunk :: Repository -> StoreID -> CipherText -> IO (Either SomeException ())
+putChunk :: Repository -> StoreID -> CipherText -> IO (Either SomeException Bool)
 putChunk Repository{..} storeID chunk = do
     let pickled = serialise chunk
         key     = mkChunkKey storeID
     e'present <- try (Store.hasKey repoStore key)
     case e'present of
-       Right True  -> return $ Right () -- entry already exists, no need to do anything more
-       Right False -> try (Store.put repoStore key pickled)
+       Right True  -> return $ Right True -- entry already exists, no need to do anything more
+       Right False -> fmap (const False) <$> try (Store.put repoStore key pickled)
        Left ex     -> return $ Left ex
 
 -- Chunks get stored under an additional folder which corresponds to the first

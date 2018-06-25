@@ -64,9 +64,10 @@ instance Serialise StoreIDKey where
 -- | Chunk metadata with a store ID and a sequence of tags,
 -- representing zero or more boundaries in the chunk.
 data Chunk t c = Chunk
-  { cStoreID :: !StoreID
-  , cOffsets :: !(TaggedOffsets t)
-  , cContent :: !c
+  { cStoreID      :: !StoreID
+  , cOffsets      :: !(TaggedOffsets t)
+  , cOriginalSize :: !(Maybe Int) -- not known on decode
+  , cContent      :: !c
   }
 
 -- | A CipherText object contains an encrypted and authenticated secret box.
@@ -102,7 +103,7 @@ hexEncode = T.pack . L8.unpack . Builder.toLazyByteString . Builder.byteStringHe
 
 -- | Calculate the storage IDs using a Hash message authentication code.
 hashChunk :: StoreIDKey -> RawChunk (TaggedOffsets t) B.ByteString -> PlainChunk t
-hashChunk key (RawChunk offsets bs) = Chunk (hashBytes key bs) offsets bs
+hashChunk key (RawChunk offsets bs) = Chunk (hashBytes key bs) offsets (Just $ B.length bs) bs
 
 hashBytes :: StoreIDKey -> B.ByteString -> StoreID
 hashBytes (StoreIDKey key) bytes = StoreID $ Saltine.encode $ Auth.auth key bytes

@@ -29,7 +29,6 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans.Resource
 
-import Data.Either
 import Data.Function (on)
 import Data.Monoid
 
@@ -174,20 +173,25 @@ snapshotTree
 -- NOTE: we write progress to stderr to get automatic flushing
 -- and to make it possible to use pipes over stdout if needed.
 progressMonitor
-    :: (MonadState Progress m, MonadIO m)
+    :: (MonadState Progress m, MonadReader (Env p) m, MonadIO m)
     => Stream' a m r
     -> m r
 progressMonitor = S.mapM_ $ \_ -> do
     Progress{..} <- get
+    startT       <- asks envStartTime
+    nowT         <- liftIO getCurrentTime
     putProgress $ unwords $ List.intersperse " | "
-        [ "Files: "  ++ show _prFiles
-        , "Chunks: " ++ show _prChunks
-        , "Input: "  ++ show (_prInputSize `div` megabyte) ++ " MB"
-        , "Output: " ++ show (_prCompressedSize `div` megabyte) ++ " MB"
-        , "Errors: " ++ show (_prErrors)
+        [ "Files: "        ++ show _prFiles
+        , "Chunks: "       ++ show _prChunks
+        , "Input: "        ++ show (_prInputSize  `div` megabyte) ++ " MB"
+        , "Deduplicated: " ++ show (_prDedupSize  `div` megabyte) ++ " MB"
+        , "Output: "       ++ show (_prStoredSize `div` megabyte) ++ " MB"
+        , "Rate: "         ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
+        , "Errors: "       ++ show (_prErrors)
         ]
   where
     putProgress s = liftIO $ hPutStr stderr $ "\r\ESC[K" ++ s
+    rate bytes ndt = round $ (toRational $ bytes `div` megabyte) / (toRational ndt) :: Int
     megabyte = 1024*1024
 
 
@@ -294,10 +298,9 @@ dedupChunks str = do
         -- query chunk cache
         isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
         if isDuplicate
-           then do -- duplicate
+           then -- duplicate
                return $ Right (cOffsets, cStoreID)
-           else do
-               modify $ over prDedupSize (+ chunkSize)
+           else
                return $ Left c
     release key
     return r
@@ -311,15 +314,13 @@ encodeChunks
 encodeChunks str = do
     Env{..} <- lift ask
     let Manifest{..} = repoManifest envRepository
-    S.mapM measureCipherChunk
-        . (S.parMap envTaskBufferSize envTaskGroup $
-               liftIO . encryptChunk mChunkKey
-                      . compressChunk)
-        $ str
+    flip (S.parMap envTaskBufferSize envTaskGroup) str $
+        liftIO . encryptChunk mChunkKey
+               . compressChunk
 
 -- | Store (upload) a stream of chunks using multiple cores.
 storeChunks
-    :: (Show t, MonadReader (Env p) m, MonadResource m)
+    :: forall m p t r. (Show t, MonadState Progress m, MonadReader (Env p) m, MonadResource m)
     => Stream' (CipherChunk t) m r
     -> Stream' (TaggedOffsets t, StoreID) m r
 storeChunks str = do
@@ -328,35 +329,47 @@ storeChunks str = do
     (key, conn) <- allocate (ChunkCache.connect cacheFile) ChunkCache.close
     str' <- S.mapM_ (liftIO . ChunkCache.insert conn . snd)
           . S.copy
+          . S.mapM measure
           . S.parMap envTaskBufferSize envTaskGroup (storeChunk envRetries envRepository)
           $ str
     release key
     return str'
-
+  where
+    measure :: (CipherChunk t, Bool) -> m (TaggedOffsets t, StoreID)
+    measure (cc@Chunk{..}, isDuplicate) = do
+        unless isDuplicate $ do
+            measureStoredSize cc
+            modify $ over prDedupSize (+ maybe 0 fromIntegral cOriginalSize)
+        return (cOffsets, cStoreID)
 
 -- | Store a ciphertext chunk (likely an upload to a remote repo).
 -- NOTE: this throws a fatal error if it cannot successfully upload a
 -- chunk after exceeding the retry limit.
-storeChunk :: Int -> Repository -> CipherChunk t -> IO (TaggedOffsets t, StoreID)
-storeChunk retries repo Chunk{..} = do
+storeChunk :: Int -> Repository -> CipherChunk t -> IO (CipherChunk t, Bool)
+storeChunk retries repo cc@Chunk{..} = do
     res <- retryWithExponentialBackoff retries $ do
         debug' $ "Storing chunk " <> T.pack (show cStoreID)
         putChunk repo cStoreID cContent
-    when (isLeft res) $ do
-        let Left (ex :: SomeException) = res
-        errorL' $ "Failed to store chunk : " <> T.pack (show ex) -- fatal abort
-    return (cOffsets, cStoreID)
+    case res of
+        Left (ex :: SomeException) ->
+            errorL' $ "Failed to store chunk : " <> T.pack (show ex) -- fatal abort
+        Right isDuplicate -> return (cc, isDuplicate)
+--            return (cOffsets, cStoreID)
 
 
 -- | Retrieve (download) a stream of chunks using multiple cores.
 retrieveChunks
-    :: (MonadReader (Env p) m, MonadIO m, Show t)
+    :: forall m p t r. (MonadState Progress m, MonadReader (Env p) m, MonadIO m, Show t)
     => Stream' (TaggedOffsets t, StoreID) m r
     -> Stream' (Either (Error t) (CipherChunk t)) m r  -- ^ assume downloading may fail
 retrieveChunks str = do
     Env{..} <- lift ask
-    S.parMap envTaskBufferSize envTaskGroup (retrieveChunk envRetries envRepository) str
-
+    S.mapM measure
+        $ S.parMap envTaskBufferSize envTaskGroup (retrieveChunk envRetries envRepository) str
+  where
+    measure :: (Either (Error t) (CipherChunk t)) -> m (Either (Error t) (CipherChunk t))
+    measure (Right cc) = measureStoredSize cc >> return (Right cc)
+    measure (Left e)   = return $ Left e
 
 -- | Retrieve a ciphertext chunk (likely a download from a remote repo).
 -- NOTE: we do not log errors here, instead we return them for aggregation elsewhere.
@@ -371,7 +384,7 @@ retrieveChunk retries repo (offsets, storeID) = do
     res <- retryWithExponentialBackoff retries $ getChunk repo storeID
     return $ (mkError +++ mkCipherChunk) $ res
   where
-    mkCipherChunk = Chunk storeID offsets
+    mkCipherChunk = Chunk storeID offsets Nothing
     mkError = Error RetrieveError offsets storeID . Just
 
 
@@ -522,13 +535,12 @@ decodeChunks
 decodeChunks str = do
     Env{..} <- lift ask
     let Manifest{..} = repoManifest envRepository
-    (S.parMap envTaskBufferSize envTaskGroup $ \cc ->
+    flip (S.parMap envTaskBufferSize envTaskGroup) str $ \cc ->
         return
             . maybe (Left $ toError cc) Right
             . fmap decompressChunk
             . decryptChunk mChunkKey
-            $ cc)
-        $ S.mapM measureCipherChunk str
+            $ cc
   where
     toError Chunk{..} = Error DecryptError cOffsets cStoreID Nothing
 
@@ -581,12 +593,11 @@ summariseErrors
     fromError e = (errOffsets e, VerifyResult $ Seq.singleton e)
     fromChunk c = (cOffsets c,   VerifyResult Seq.empty)
 
--- | Measure encrypted and compressed size of CipherChunk
-measureCipherChunk
+-- | Measure the stored size (encrypted and compressed size) of CipherChunk
+measureStoredSize
     :: MonadState Progress m
     => CipherChunk t
-    -> m (CipherChunk t)
-measureCipherChunk c@Chunk{..} = do
-    let chunkSize = fromIntegral $ B.length (cSecretBox cContent)
-    modify $ over prCompressedSize (+ chunkSize)
-    return c
+    -> m ()
+measureStoredSize Chunk{..} = do
+    let encodedSize = fromIntegral $ B.length (cSecretBox cContent)
+    modify $ over prStoredSize (+ encodedSize)

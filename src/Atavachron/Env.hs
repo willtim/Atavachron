@@ -56,15 +56,15 @@ allFiles :: FilePredicate
 allFiles = FilePredicate (const $ return True)
 
 -- | Progress state used during backup.
--- TODO throughput rates, corrupt file/chunks
+-- TODO corrupt file/chunks?
 data Progress = Progress
-  { _prFiles           :: !Int64
-  , _prChunks          :: !Int64
-  , _prInputSize       :: !Int64
-  , _prDedupSize       :: !Int64 -- deduplicated size
-  , _prCompressedSize  :: !Int64 -- deduplicated and compressed size
-  , _prErrors          :: !Int64
-  , _prWarnings        :: !Int64
+  { _prFiles      :: !Int64
+  , _prChunks     :: !Int64
+  , _prInputSize  :: !Int64
+  , _prDedupSize  :: !Int64 -- deduplicated size
+  , _prStoredSize :: !Int64 -- deduplicated and compressed size
+  , _prErrors     :: !Int64
+  , _prWarnings   :: !Int64
   } deriving (Show)
 
 makeLenses ''Progress
