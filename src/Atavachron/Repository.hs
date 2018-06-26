@@ -322,8 +322,12 @@ newAccessKey store manifestKey name pass = do
 -- | Get repository access using the supplied password.
 authenticate :: Text -> Text -> IO (Repository, CachedCredentials)
 authenticate  repoURL pass = do
-    store    <- either (errorL' . ("Cannot parse URL: "<>)) id
+    store       <- either (errorL' . ("Cannot parse URL: "<>)) id
                    <$> parseURL repoURL
+    hasManifest <- Store.hasKey store manifestStoreKey
+    unless hasManifest $
+        errorL' $ "Could not find a repository at the supplied URL"
+
     -- for now, just try each key in succession
     let keyStr = listAccessKeys store
     (manifestKey, cc) <- fromMaybe (errorL' "Password does not match any stored!")
@@ -348,8 +352,12 @@ authenticate  repoURL pass = do
 -- | Get repository access using the supplied cached credentials.
 authenticate' :: Text -> CachedCredentials -> IO Repository
 authenticate' repoURL CachedCredentials{..} = do
-    store    <- either (errorL' . ("Cannot parse URL: "<>)) id
+    store       <- either (errorL' . ("Cannot parse URL: "<>)) id
                    <$> parseURL repoURL
+    hasManifest <- Store.hasKey store manifestStoreKey
+    unless hasManifest $
+        errorL' $ "Could not find a repository at the supplied URL"
+
     res      <- getAccessKey store ccAccessKeyName
     case res of
         Left ex -> errorL $ "Could not retrieve access key: " <> T.pack (show ex)
