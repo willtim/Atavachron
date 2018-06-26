@@ -403,7 +403,7 @@ writeFilesCache
   => Stream' (FileItem, ChunkList) m r
   -> Stream' (FileItem, ChunkList) m r
 writeFilesCache str = do
-    cacheFile <- resolveCacheFileName "files.tmp"
+    cacheFile <- getFilesCacheName "files.tmp" >>= resolveCacheFileName
     sourceDir <- asks $ bSourceDir . envParams
     writeCacheFile cacheFile
         . relativePaths sourceDir
@@ -415,23 +415,23 @@ readFilesCache
   :: (MonadReader (Env Backup) m, MonadResource m)
   => Stream' (FileItem, ChunkList) m ()
 readFilesCache = do
-    cacheFile <- getFilesCacheName >>= resolveCacheFileName
+    cacheFile <- getFilesCacheName "files" >>= resolveCacheFileName
     sourceDir <- asks $ bSourceDir . envParams
     S.map (ceFileItem &&& ceChunkList)
         . absolutePaths sourceDir
         $ readCacheFile cacheFile
 
 
-getFilesCacheName :: MonadReader (Env Backup) m => m RawName
-getFilesCacheName = do
+getFilesCacheName :: MonadReader (Env Backup) m => RawName -> m RawName
+getFilesCacheName prefix = do
     name  <- Builder.toLazyByteString . Builder.byteStringHex . getRawFilePath <$> asks (bSourceDir . envParams)
-    return $ "files-" <> LB.toStrict name
+    return $ prefix <> "." <> LB.toStrict name
 
 -- NOTE: We only commit updates to the file cache if the entire backup completes.
 commitFilesCache :: (MonadIO m, MonadCatch m, MonadReader (Env Backup) m) => m ()
 commitFilesCache = do
-    cacheFile  <- resolveCacheFileName' "files.tmp"
-    cacheFile' <- getFilesCacheName >>= resolveCacheFileName'
+    cacheFile  <- getFilesCacheName "files.tmp" >>= resolveCacheFileName'
+    cacheFile' <- getFilesCacheName "files"     >>= resolveCacheFileName'
     res <- try $ liftIO $ Dir.renameFile cacheFile cacheFile'
     case res of
         Left (ex :: SomeException) -> errorL' $ "Failed to update cache file: " <> (T.pack $ show ex)
