@@ -34,7 +34,7 @@ To test atavachron, we can initialise a local filesystem repository:
 To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would use:
 
     $ atavachron backup -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
-    Files: 36  |  Chunks: 40  |  Input: 53 MB  |  Output: 53 MB  |  Errors: 0
+    Files: 36  |  Chunks: 37  |  In: 50 MB  |  Out (dedup): 50 MB  |  Out (stored):  50 MB  |  Rate: 37 MB/s  |  Errors: 0
     Wrote snapshot 107ee7fd
 
 ### Listing
