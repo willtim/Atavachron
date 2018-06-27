@@ -71,35 +71,37 @@ data Command
 -- Wherefore art thou OverloadedRecordLabels?
 
 data InitOptions = InitOptions
-    { iRepoURL    :: Text
+    { iRepoURL     :: Text
     }
 
 data BackupOptions = BackupOptions
-    { bSourceDir  :: Text
-    , bRepoURL    :: Text
+    { bSourceDir   :: Text
+    , bRepoURL     :: Text
+    , bGlobPair    :: GlobPair
     }
 
 data VerifyOptions = VerifyOptions
-    { vSnapshotID :: Text
-    , vRepoURL    :: Text
+    { vSnapshotID  :: Text
+    , vRepoURL     :: Text
+    , vGlobPair    :: GlobPair
     }
 
 data RestoreOptions = RestoreOptions
     { rSnapshotID  :: Text
     , rRepoURL     :: Text
     , rTargetDir   :: Text
-    , rIncludeGlob :: Maybe FileGlob
+    , rGlobPair    :: GlobPair
     }
 
 data ListOptions = ListOptions
-    { lRepoURL  :: Text
-    , lArgument :: ListArgument
+    { lRepoURL     :: Text
+    , lArgument    :: ListArgument
     }
 
 data ListArgument
     = ListSnapshots
     | ListAccessKeys
-    | ListFiles SnapshotName (Maybe FileGlob)
+    | ListFiles SnapshotName GlobPair
 
 data DiffOptions = DiffOptions
     { dRepoURL     :: Text
@@ -114,6 +116,14 @@ data KeyOptions = KeyOptions
 
 data KeysArgument
     = AddKey Text
+
+data GlobPair = GlobPair
+    { includeGlob :: Maybe FileGlob
+    , excludeGlob :: Maybe FileGlob
+    }
+
+noGlobs :: GlobPair
+noGlobs = GlobPair Nothing Nothing
 
 runCommand :: Command -> IO ()
 runCommand (CInit options)    = initialise options
@@ -137,14 +147,14 @@ backup :: BackupOptions -> IO ()
 backup BackupOptions{..} = do
     sourceDir <- parseAbsDir' bSourceDir
     repo      <- authenticate bRepoURL
-    runBackup repo sourceDir
+    runBackup repo sourceDir bGlobPair
     T.putStrLn $ "Backup complete."
 
 verify :: VerifyOptions -> IO ()
 verify VerifyOptions{..} = do
     repo      <- authenticate vRepoURL
     snap      <- getSnapshot repo  vSnapshotID
-    runVerify repo snap
+    runVerify repo snap vGlobPair
     T.putStrLn $ "Verification complete."
 
 restore :: RestoreOptions -> IO ()
@@ -152,21 +162,20 @@ restore RestoreOptions{..} = do
     targetDir <- parseAbsDir' rTargetDir
     repo      <- authenticate rRepoURL
     snap      <- getSnapshot repo rSnapshotID
-    let filePred = maybe allFiles parseGlob rIncludeGlob
-    runRestore repo snap filePred targetDir
+    runRestore repo snap targetDir rGlobPair
     T.putStrLn $ "Restore complete."
 
 list :: ListOptions -> IO ()
 list ListOptions{..} = do
     case lArgument of
-        ListSnapshots             -> listSnapshots lRepoURL
-        ListAccessKeys            -> listAccessKeys lRepoURL
-        ListFiles partialKey glob -> listFiles lRepoURL partialKey glob
+        ListSnapshots              -> listSnapshots lRepoURL
+        ListAccessKeys             -> listAccessKeys lRepoURL
+        ListFiles partialKey globs -> listFiles lRepoURL partialKey globs
 
 diff :: DiffOptions -> IO ()
 diff DiffOptions{..} = do
     repo      <- authenticate dRepoURL
-    env       <- makeEnv (Restore (AbsDir mempty) allFiles) repo
+    env       <- makeEnv repo rootDir noGlobs
     snap1     <- getSnapshot repo dSnapshotID1
     snap2     <- getSnapshot repo dSnapshotID2
     runResourceT
@@ -209,22 +218,22 @@ listAccessKeys repoURL = do
     repo      <- authenticate repoURL
     S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
 
-listFiles :: Text -> SnapshotName -> Maybe FileGlob -> IO ()
-listFiles repoURL partialKey includeGlob = do
-    let filePred = maybe allFiles parseGlob includeGlob
+listFiles :: Text -> SnapshotName -> GlobPair -> IO ()
+listFiles repoURL partialKey globs = do
     repo <- authenticate repoURL
-    env  <- makeEnv (Restore (AbsDir mempty) filePred) repo
+    env  <- makeEnv repo rootDir globs
     snap <- liftIO $ getSnapshot repo partialKey
     runResourceT
         . flip evalStateT initialProgress
         . flip runReaderT env
         . S.mapM_ (liftIO . printFile)
         . S.lefts
-        . filterItems
+        . filterItems fst
         $ snapshotTree snap
   where
     printFile (item, {-Repository.ChunkList chunks-} _) = do
-        fp <- getFilePath (filePath item)
+        -- print out as a relative path, i.e. without the leading '/'.
+        fp <- getFilePath (relativise rootDir $ filePath item)
         putStrLn fp
         -- forM_ chunks $ T.putStrLn . hexEncode
 
@@ -237,9 +246,9 @@ addAccessKey repoURL name = do
     cc   <- Repository.newAccessKey (repoStore repo) (repoManifestKey repo) name pass
     saveCredentials repoURL cc
 
-runBackup :: Repository -> Path Abs Dir -> IO ()
-runBackup repo sourceDir = do
-    env      <- makeEnv (Backup sourceDir) repo
+runBackup :: Repository -> Path Abs Dir -> GlobPair -> IO ()
+runBackup repo sourceDir globs = do
+    env      <- makeEnv repo sourceDir globs
     snapshot <-
         runResourceT
           . flip evalStateT initialProgress
@@ -253,9 +262,9 @@ runBackup repo sourceDir = do
             T.hPutStrLn IO.stderr $ "\nWrote snapshot " <> T.take 8 key
             runReaderT commitFilesCache env
 
-runVerify :: Repository -> Snapshot -> IO ()
-runVerify repo snapshot = do
-    env <- makeEnv (Restore (AbsDir mempty) allFiles) repo
+runVerify :: Repository -> Snapshot -> GlobPair -> IO ()
+runVerify repo snapshot globs = do
+    env <- makeEnv repo rootDir globs
     runResourceT
         . flip evalStateT initialProgress
         . flip runReaderT env
@@ -267,9 +276,9 @@ runVerify repo snapshot = do
             path <- liftIO $ getFilePath (filePath item)
             warn' $ "File has errors: " <> (T.pack path)
 
-runRestore :: Repository -> Snapshot -> FilePredicate -> Path Abs Dir -> IO ()
-runRestore repo snapshot sourcePred targetDir = do
-    env <- makeEnv (Restore targetDir sourcePred) repo
+runRestore :: Repository -> Snapshot -> Path Abs Dir -> GlobPair -> IO ()
+runRestore repo snapshot targetDir globs = do
+    env <- makeEnv repo targetDir globs
     runResourceT
         . flip evalStateT initialProgress
         . flip runReaderT env
@@ -308,8 +317,8 @@ saveCredentials repoURL cc = do
     T.putStrLn $ "Credentials cached at " <> T.pack filePath
 
 -- TODO optionally read this from an Expresso config file?
-makeEnv :: p -> Repository -> IO (Env p)
-makeEnv params repo = do
+makeEnv :: Repository -> Path Abs Dir -> GlobPair -> IO Env
+makeEnv repo localDir globs = do
     debug' $ "Available cores: " <> T.pack (show numCapabilities)
     startT      <- getCurrentTime
 
@@ -325,7 +334,8 @@ makeEnv params repo = do
          , envTaskGroup      = taskGroup
          , envRetries        = 5
          , envCachePath      = cachePath
-         , envParams         = params
+         , envFilePredicate  = parseGlobPair globs
+         , envDirectory      = localDir
          }
 
 -- | For now, default to XDG standard
@@ -348,6 +358,13 @@ getSnapshot repo partialKey = do
     case e'snap of
         Left ex    -> errorL' $ "Could not retrieve snapshot: " <> T.pack (show ex)
         Right snap -> return snap
+
+parseGlobPair :: GlobPair -> FilePredicate
+parseGlobPair GlobPair{..} = FilePredicate $ \path ->
+    (&&) <$> applyPredicate includePred path <*> (not <$> applyPredicate excludePred path)
+  where
+    includePred = maybe allFiles parseGlob includeGlob
+    excludePred = maybe noFiles  parseGlob excludeGlob
 
 parseGlob :: Text -> FilePredicate
 parseGlob g = FilePredicate $ \path ->

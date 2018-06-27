@@ -41,13 +41,13 @@ initOptionsP :: Parser Command
 initOptionsP = CInit <$> (InitOptions <$> repoUrlP)
 
 backupOptionsP :: Parser Command
-backupOptionsP = CBackup <$> (BackupOptions <$> sourceDirP <*> repoUrlP)
+backupOptionsP = CBackup <$> (BackupOptions <$> sourceDirP <*> repoUrlP <*> globPairP)
 
 verifyOptionsP :: Parser Command
-verifyOptionsP = CVerify <$> (VerifyOptions <$> snapIdP <*> repoUrlP)
+verifyOptionsP = CVerify <$> (VerifyOptions <$> snapIdP <*> repoUrlP <*> globPairP)
 
 restoreOptionsP :: Parser Command
-restoreOptionsP = CRestore <$> (RestoreOptions <$> snapIdP <*> repoUrlP <*> targetDirP <*> includeP)
+restoreOptionsP = CRestore <$> (RestoreOptions <$> snapIdP <*> repoUrlP <*> targetDirP <*> globPairP)
 
 listOptionsP :: Parser Command
 listOptionsP = CList <$> (ListOptions <$> repoUrlP <*> listArgP)
@@ -75,7 +75,10 @@ listAccessKeysP = flag' ListAccessKeys
   <> help "List access keys" )
 
 listFilesP :: Parser ListArgument
-listFilesP = ListFiles <$> snapIdP <*> includeP
+listFilesP = ListFiles <$> snapIdP <*> globPairP
+
+globPairP :: Parser GlobPair
+globPairP = GlobPair <$> includeGlobP <*> excludeGlobP
 
 addKeyP :: Parser KeysArgument
 addKeyP = AddKey <$> strOption
@@ -102,12 +105,19 @@ snapIdP = strArgument
   (  metavar "SNAPSHOT-ID"
   <> help "Snapshot ID" )
 
-includeP :: Parser (Maybe Text)
-includeP = optional $ strOption
+includeGlobP :: Parser (Maybe Text)
+includeGlobP = optional $ strOption
   (  long "include"
   <> short 'i'
   <> metavar "PATTERN"
   <> help "Only include files matching PATTERN" )
+
+excludeGlobP :: Parser (Maybe Text)
+excludeGlobP = optional $ strOption
+  (  long "exclude"
+  <> short 'e'
+  <> metavar "PATTERN"
+  <> help "Exclude any files matching PATTERN" )
 
 repoUrlP :: Parser Text
 repoUrlP = strOption

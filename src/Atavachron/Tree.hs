@@ -295,11 +295,11 @@ instance Exception DeserialiseTreeError
 
 -- | Tree data written as one large chunked and de-duplicated file.
 serialiseTree
-    :: forall m r. (MonadReader (Env Backup) m)
+    :: forall m r. (MonadReader Env m)
     => Stream' (Either (FileItem, ChunkList) OtherItem) m r
     -> Stream' (RawChunk Tree B.ByteString) m r
 serialiseTree str = do
-    sourceDir <- asks $ bSourceDir . envParams
+    sourceDir <- asks envDirectory
     S.map (RawChunk Tree . LB.toStrict . serialise)
       . relativePaths sourceDir
       . S.map mkTreeEntry
@@ -317,11 +317,11 @@ serialiseTree str = do
 
 -- NOTE: it's catastrophic if we cannot deserialise the tree
 deserialiseTree
-    :: (MonadReader (Env Restore) m, MonadThrow m, MonadIO m)
+    :: (MonadReader Env m, MonadThrow m, MonadIO m)
     => Stream' (RawChunk Tree B.ByteString) m r
     -> Stream' (Either (FileItem, ChunkList) OtherItem) m r
 deserialiseTree str = do
-    targetDir <- lift . asks $ rTargetDir . envParams
+    targetDir <- lift . asks $ envDirectory
     S.left uncompressLists
         . S.map extract
         . absolutePaths targetDir

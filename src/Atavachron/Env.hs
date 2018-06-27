@@ -5,7 +5,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
--- | Environment types used throught Atavachron pipelines.
+-- | Environment and other types used throught Atavachron pipelines.
 --
 
 module Atavachron.Env where
@@ -26,23 +26,15 @@ import Atavachron.Streaming (TaskGroup)
 
 
  -- | Environment used during backup, verify and restore.
-data Env params = Env
+data Env = Env
   { envRepository     :: Repository       -- ^ The remote destination repository.
   , envStartTime      :: !UTCTime         -- ^ Start time of current backup.
   , envRetries        :: !Int             -- ^ Number of times to retry failed gets and puts to the store.
   , envTaskBufferSize :: !Int             -- ^ Size of readahead for the stream, used for parallel processing.
   , envTaskGroup      :: !TaskGroup       -- ^ Sized with the number of processing cores.
   , envCachePath      :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
-  , envParams         :: params           -- ^ Task specific parameters.
-  }
-
-data Backup = Backup
-  { bSourceDir  :: !(Path Abs Dir)  -- ^ the local directory being backed up
-  }
-
-data Restore = Restore
-  { rTargetDir  :: !(Path Abs Dir) -- ^ the local directory to restore files to
-  , rPredicate  :: !FilePredicate  -- ^ predicate which defines what to restore
+  , envFilePredicate  :: !FilePredicate   -- ^ Predicate for including/excluding files to process.
+  , envDirectory      :: !(Path Abs Dir)  -- ^ The local directory being backed up or restored to.
   }
 
 -- for now, just a predicate on the filepath
@@ -55,8 +47,11 @@ applyPredicate (FilePredicate f) item = f item
 allFiles :: FilePredicate
 allFiles = FilePredicate (const $ return True)
 
+noFiles :: FilePredicate
+noFiles = FilePredicate (const $ return False)
+
 -- | Progress state used during backup.
--- TODO corrupt file/chunks?
+-- TODO better errors and warnings, e.g. show retries?
 data Progress = Progress
   { _prFiles      :: !Int64
   , _prChunks     :: !Int64
@@ -64,13 +59,12 @@ data Progress = Progress
   , _prDedupSize  :: !Int64 -- deduplicated size
   , _prStoredSize :: !Int64 -- deduplicated and compressed size
   , _prErrors     :: !Int64
-  , _prWarnings   :: !Int64
   } deriving (Show)
 
 makeLenses ''Progress
 
 initialProgress :: Progress
-initialProgress = Progress 0 0 0 0 0 0 0
+initialProgress = Progress 0 0 0 0 0 0
 
 data ErrorKind
   = StoreError

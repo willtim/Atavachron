@@ -79,6 +79,10 @@ popDir (RelDir pops ns)
     | null ns   = RelDir (if pops>0 then pred pops else pops) ns
     | otherwise = RelDir pops (dropR 1 ns)
 
+-- | The absolute root directory "/".
+rootDir :: Path Abs Dir
+rootDir = AbsDir mempty
+
 -- should be in Data.Sequence
 dropR :: Int -> Seq a -> Seq a
 dropR i s = fst $ Seq.splitAt (length s - i) s
@@ -99,13 +103,21 @@ pathElems :: Path Abs t -> Seq RawName
 pathElems (AbsDir ns) = ns
 pathElems (FilePath dir n) = pathElems dir Seq.|> n
 
+isAbsolute :: Path b t -> Bool
+isAbsolute AbsDir{}         = True
+isAbsolute RelDir{}         = False
+isAbsolute (FilePath dir _) = isAbsolute dir
+
 getRawFilePath :: Path b t -> RawFilePath
-getRawFilePath = B.concat . ("/":) . List.intersperse "/" . go
+getRawFilePath p = B.concat . prefix . List.intersperse "/" $ go p
   where
     go :: Path b t -> [RawName]
     go (AbsDir ns)      = toList ns
     go (RelDir pops ns) = replicate pops ".." <> toList ns
     go (FilePath dir n) = go dir <> [n]
+
+    prefix | isAbsolute p = ("/":)
+           | otherwise    = id
 
 -- | Relativise the second path, using the first path as the prefix.
 relativise :: Path Abs Dir -> Path Abs t -> Path Rel t
