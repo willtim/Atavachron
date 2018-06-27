@@ -101,7 +101,7 @@ Atavachron is a different point in the design space. In order to handle potentia
 
 ### Why not use an existing backup program for Amazon S3?
 
-They will be more appropriate in most cases. However, typically other backup programs are not *scalable*, which can be a problem for large amounts of data and machines with limited memory. Atavachron is GPL3 licensed and will also appeal to those who would rather hack and modify a Haskell program in preference to anything else (which include me!).
+They will be more appropriate in most cases. However, typically other backup programs are not *scalable*, which can be a problem for large amounts of data and machines with limited memory. Atavachron is GPL3 licensed and will also appeal to those who would rather hack and modify a Haskell program in preference to anything else (which includes me!).
 
 ### What exactly do you mean by scalable?
 

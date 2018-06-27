@@ -13,6 +13,7 @@ import Atavachron.Streaming
 
 -- | A path used to qualify keys
 newtype Path = Path { unPath :: Text }
+    deriving (Eq, Ord)
 
 instance Show Path where
     show = T.unpack . unPath
@@ -21,7 +22,7 @@ instance Show Path where
 data Key = Key
   { kPath :: !Path
   , kName :: !Text
-  } deriving Show
+  } deriving (Eq, Ord, Show)
 
 -- | An external, likely remote, store.
 -- NOTE: get and put are restricted to objects less than 10MB.

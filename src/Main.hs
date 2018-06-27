@@ -75,7 +75,7 @@ listAccessKeysP = flag' ListAccessKeys
   <> help "List access keys" )
 
 listFilesP :: Parser ListArgument
-listFilesP = ListFiles <$> snapIdP
+listFilesP = ListFiles <$> snapIdP <*> includeP
 
 addKeyP :: Parser KeysArgument
 addKeyP = AddKey <$> strOption

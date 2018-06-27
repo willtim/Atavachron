@@ -23,7 +23,6 @@ import qualified Data.ByteString.Char8 as B8
 
 import Codec.Serialise
 
-import Data.Maybe
 import Data.Monoid
 
 import Data.Foldable
@@ -108,28 +107,18 @@ getRawFilePath = B.concat . ("/":) . List.intersperse "/" . go
     go (RelDir pops ns) = replicate pops ".." <> toList ns
     go (FilePath dir n) = go dir <> [n]
 
-
 -- | Relativise the second path, using the first path as the prefix.
-relativise :: Path Abs Dir -> Path Abs t -> Maybe (Path Rel t)
+relativise :: Path Abs Dir -> Path Abs t -> Path Rel t
 relativise prefix absDir@(AbsDir{})      = makeRelDir prefix absDir
-relativise prefix (FilePath absDir name) = flip makeFilePath name <$> makeRelDir prefix absDir
+relativise prefix (FilePath absDir name) = flip makeFilePath name $ makeRelDir prefix absDir
 
--- | This version blows up.
-relativise' :: Path Abs Dir -> Path Abs t -> Path Rel t
-relativise' prefix path
-    = fromMaybe (error "relativise': Assertion failed")
-    $ relativise prefix path
-
--- NOTE: The supplied directory paths must share a common prefix.
-makeRelDir :: Path Abs Dir -> Path Abs Dir -> Maybe (Path Rel Dir)
-makeRelDir path1 path2
-    | root  <- getCommonPrefix path1 path2
-    , depth <- getDepth root
-    , depth > 0 =
-          let pops   = length $ Seq.drop depth $ pathElems path1
-              pushes = Seq.drop depth $ pathElems path2
-          in Just $ RelDir pops pushes
-    | otherwise = Nothing
+makeRelDir :: Path Abs Dir -> Path Abs Dir -> Path Rel Dir
+makeRelDir path1 path2 = RelDir pops pushes
+  where
+    pops   = length . Seq.drop depth $ pathElems path1
+    pushes = Seq.drop depth $ pathElems path2
+    root   = getCommonPrefix path1 path2
+    depth  = getDepth root
 
 getDepth :: Path Abs Dir -> Int
 getDepth (AbsDir ns) = length ns

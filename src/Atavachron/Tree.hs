@@ -138,11 +138,6 @@ instance HasPath TreeEntry where
     getParent (DirEntry item)         = parent (filePath item)
     getParent (LinkEntry item _)      = parent (filePath item)
 
-data PatchingError = PatchingError
-    deriving Show
-
-instance Exception PatchingError
-
 
 -- | Enumerate items in the supplied path. Not Recursive. Not Ordered.
 -- ResourceT is used to guarantee closure of handles in the presence of exceptions.
@@ -231,7 +226,7 @@ relativePaths
     -> Stream' (entry Abs)  m r
     -> Stream' (entry Rel) m r
 relativePaths = S.mapAccumM_ $ \prevDir entry -> do
-    let entry'   = mapPath (relativise' prevDir) entry
+    let entry'   = mapPath (relativise prevDir) entry
         absDir   = getParent entry
     return (absDir, entry')
 
@@ -291,36 +286,6 @@ diff f g = loop
     filePath2  = filePath  . g
     fileMTime2 = fileMTime . g
 
-patch :: forall m. MonadThrow m
-      => Stream' (Diff FileItem FileItem) m ()
-      -> Stream' FileItem m ()
-      -> Stream' FileItem m ()
-patch = loop
-  where
-    loop ds es = do
-        edits  <- lift (next ds)
-        case edits of
-            Right (Insert x, xs) -> insert x >> patch xs es
-            Right (Delete x, xs) -> patch xs (delete x es)
-            Right (Keep   x, xs) -> insert x >> patch xs (delete x es)
-            Right (Change x, xs) -> insert x >> patch xs (delete x es)
-            Left{}               -> do
-                entries <- lift (next es)
-                case entries of
-                    Left{}       -> return ()
-                    Right{}      -> lift $ throwM PatchingError
-
-    insert :: FileItem -> Stream' FileItem m ()
-    insert = yield
-
-    delete :: FileItem -> Stream' FileItem m () -> Stream' FileItem m ()
-    delete e es = do
-        entries <- lift (next es)
-        case entries of
-            Left{}          -> lift $ throwM PatchingError
-            Right(e',es')
-                | e == e'   -> es'
-                | otherwise -> lift $ throwM PatchingError
 
 data DeserialiseTreeError = DeserialiseTreeError SomeException
     deriving Show

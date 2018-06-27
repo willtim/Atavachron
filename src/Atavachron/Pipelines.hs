@@ -221,7 +221,7 @@ filterItems str = do
     targetDir <- asks $ rTargetDir . envParams
 
     let apply :: FileMeta (Path Abs t) -> IO Bool
-        apply item = applyPredicate p (relativise' targetDir $ filePath item)
+        apply item = applyPredicate p (relativise targetDir $ filePath item)
 
     flip S.filterM str $ liftIO . \case
         Left (item, _)          -> apply item

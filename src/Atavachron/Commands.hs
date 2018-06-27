@@ -45,6 +45,7 @@ import System.FilePath.Glob
 import qualified System.Directory as Dir
 import qualified System.Posix.Files as Files
 
+-- import Atavachron.Chunk.Encode (hexEncode)
 import Atavachron.Path
 import Atavachron.Tree (FileMeta(..), Diff(..))
 import qualified Atavachron.Tree as Tree
@@ -55,6 +56,7 @@ import Atavachron.Pipelines
 import Atavachron.Streaming (mkTaskGroup)
 import qualified Atavachron.Streaming as S
 
+type FileGlob = Text
 
 data Command
   = CInit    InitOptions
@@ -86,7 +88,7 @@ data RestoreOptions = RestoreOptions
     { rSnapshotID  :: Text
     , rRepoURL     :: Text
     , rTargetDir   :: Text
-    , rIncludeGlob :: Maybe Text
+    , rIncludeGlob :: Maybe FileGlob
     }
 
 data ListOptions = ListOptions
@@ -97,7 +99,7 @@ data ListOptions = ListOptions
 data ListArgument
     = ListSnapshots
     | ListAccessKeys
-    | ListFiles SnapshotName
+    | ListFiles SnapshotName (Maybe FileGlob)
 
 data DiffOptions = DiffOptions
     { dRepoURL     :: Text
@@ -157,9 +159,9 @@ restore RestoreOptions{..} = do
 list :: ListOptions -> IO ()
 list ListOptions{..} = do
     case lArgument of
-        ListSnapshots        -> listSnapshots lRepoURL
-        ListAccessKeys       -> listAccessKeys lRepoURL
-        ListFiles partialKey -> listFiles lRepoURL partialKey
+        ListSnapshots             -> listSnapshots lRepoURL
+        ListAccessKeys            -> listAccessKeys lRepoURL
+        ListFiles partialKey glob -> listFiles lRepoURL partialKey glob
 
 diff :: DiffOptions -> IO ()
 diff DiffOptions{..} = do
@@ -207,21 +209,24 @@ listAccessKeys repoURL = do
     repo      <- authenticate repoURL
     S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
 
-listFiles :: Text -> SnapshotName -> IO ()
-listFiles repoURL partialKey = do
+listFiles :: Text -> SnapshotName -> Maybe FileGlob -> IO ()
+listFiles repoURL partialKey includeGlob = do
+    let filePred = maybe allFiles parseGlob includeGlob
     repo <- authenticate repoURL
-    env  <- makeEnv (Restore (AbsDir mempty) allFiles) repo
+    env  <- makeEnv (Restore (AbsDir mempty) filePred) repo
     snap <- liftIO $ getSnapshot repo partialKey
     runResourceT
         . flip evalStateT initialProgress
         . flip runReaderT env
-        . S.mapM_ (liftIO . printFile . fst)
+        . S.mapM_ (liftIO . printFile)
         . S.lefts
+        . filterItems
         $ snapshotTree snap
   where
-    printFile item = do
+    printFile (item, {-Repository.ChunkList chunks-} _) = do
         fp <- getFilePath (filePath item)
         putStrLn fp
+        -- forM_ chunks $ T.putStrLn . hexEncode
 
 addAccessKey :: Text -> Text -> IO ()
 addAccessKey repoURL name = do
