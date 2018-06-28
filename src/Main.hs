@@ -26,7 +26,7 @@ optionsP = Options
     <> command "verify"    (info verifyOptionsP   ( progDesc "Verify the integrity of a snapshot and its files in the repository." ))
     <> command "restore"   (info restoreOptionsP  ( progDesc "Restore files from a snapshot to a target directory." ))
     <> command "snapshots" (info snapshotOptionsP ( progDesc "List snapshots in the repository." ))
-    <> command "list"      (info listOptionsP     ( progDesc "List files for a particuler snapshot." ))
+    <> command "list"      (info listOptionsP     ( progDesc "List files for a particular snapshot." ))
     <> command "diff"      (info diffOptionsP     ( progDesc "Diff two snapshots." ))
     <> command "keys"      (info keyOptionsP      ( progDesc "Management of password-protected access keys."))
     -- <> command "help"      (info helpOptionsP    ( progDesc "Help for a particular command"))

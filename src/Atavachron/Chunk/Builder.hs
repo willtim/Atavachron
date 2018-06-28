@@ -75,8 +75,8 @@ addChunk bb bs = bb <> fromByteString bs mempty
 splitTaggedOffsets :: Int -> TaggedOffsets t -> (TaggedOffsets t, TaggedOffsets t)
 splitTaggedOffsets i ts = (l, shift r)
   where
-    (l, r) = Seq.breakl (\(_, offset) -> offset >= i) ts
-    shift = fmap (\(tag, j) -> (tag, j-i))
+    (!l, !r) = Seq.breakl (\(_, offset) -> offset >= i) ts
+    shift    = fmap (\(tag, j) -> (tag, j-i))
 
 -- | add currentTag explicitly as first zero offset, if necessary
 setZeroOffset :: Maybe t -> TaggedOffsets t -> TaggedOffsets t
@@ -118,7 +118,7 @@ buildToSize bb targetSize currentTag str
                           | otherwise = addTaggedChunk bb tag
                   in case () of
                       _ | bSize bb + B.length bs >= targetSize ->
-                          let !(bs', bs'') = B.splitAt (targetSize - bSize bb) bs
+                          let (!bs', !bs'') = B.splitAt (targetSize - bSize bb) bs
                           in return ( add bs'
                                     , Just tag
                                     , Right $ S.cons (RawChunk tag bs'') str')

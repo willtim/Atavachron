@@ -209,7 +209,7 @@ keysPath :: Store.Path
 keysPath = Store.Path "keys"
 
 manifestStoreKey :: Store.Key
-manifestStoreKey = Store.Key rootPath "manifest"
+manifestStoreKey = Store.Key rootPath "atavachron-manifest"
 
 -- | Get the chunk associated with a key, if it exists.
 -- NOTE: We first check that the key exists, so that we can return a known exception

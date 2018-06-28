@@ -165,7 +165,7 @@ reinterleaveRights f g = loop Seq.empty
                             (!pending, !items') = Seq.spanl predicate items
                         S.each $ fmap Right pending Seq.|> l
                         loop items' str'
-                    (Right nrItem) ->
+                    Right nrItem ->
                         loop (items Seq.|> nrItem) str'
 
 

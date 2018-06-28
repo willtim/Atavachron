@@ -101,13 +101,13 @@ rechunkCDC cdcKey CDCParams{..} = loop mempty Nothing
         let !inChunk  = toByteString builder
             !tags     = bTaggedOffsets builder
         builder'  <- case split hvs cpWinSize minSize cpLog2AvgSize inChunk of
-                        (outChunk, remChunk)
+                        (!outChunk, !remChunk)
                             | B.null outChunk ->
                                   -- supplied bytestring was too small
                                   return $ fromByteString remChunk tags
                             | otherwise    -> do
                                   -- split offset metadata, if there is any
-                                  let !(outTags, remTags) = splitTaggedOffsets (B.length outChunk) tags
+                                  let (!outTags, !remTags) = splitTaggedOffsets (B.length outChunk) tags
                                   yield $ RawChunk outTags outChunk
                                   return $ fromByteString remChunk remTags
         case res of

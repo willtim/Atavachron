@@ -23,11 +23,11 @@ Atavachron is a Haskell cabal project. It should be buildable by installing the 
 
 To test atavachron, we can initialise a local filesystem repository:
 
-    $ atavachron init -r file:/home/tim/test-repo
+    $ atavachron init -r file:///home/tim/test-repo
     Enter password:
     Re-enter password:
     Credentials cached at /home/tim/.cache/atavachron/%2Fhome%2Ftim%2Ftest-repo/credentials
-    Repository created at file:/home/tim/test-repo
+    Repository created at file:///home/tim/test-repo
 
 ### Backing up
 
@@ -46,7 +46,7 @@ To list all snapshots, we provide the command 'snapshots' together with the mand
 
 To list all files within a snapshot, we provide the command 'list' together with a snapshot ID.  We only need to specify enough of the snapshot ID to avoid ambiguity:
 
-    $ atavachron list 107 -r file:/home/tim/test-repo
+    $ atavachron list 107 -r file:///home/tim/test-repo
 
 ### Restoring
 
@@ -77,7 +77,7 @@ To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a region
 
 ## Repository structure
 
-The repository structure is common to all store back-ends. At the root of the repository there is an encrypted file 'manifest' which contains metadata such as the keys necessary to encrypt/decrypt/hash all chunks and snapshots. The chunks and snapshots are stored under their associated folders using content-derived keys. The 'keys' folder contains named access keys, which can be used to obtain the manifest encryption key and thus access to the repository, when combined with a matching password.
+The repository structure is common to all store back-ends. At the root of the repository there is an encrypted file 'atavachron-manifest' which contains metadata such as the keys necessary to encrypt/decrypt/hash all chunks and snapshots. The chunks and snapshots are stored under their associated folders using content-derived keys. The 'keys' folder contains named access keys, which can be used to obtain the manifest encryption key and thus access to the repository, when combined with a matching password.
 
     .
     ├── chunks
@@ -87,7 +87,7 @@ The repository structure is common to all store back-ends. At the root of the re
     │       └── 4f7fbb0cbec15377529ce2dc0dd2e3e9ebbd645f4312681a2de81ddee8099dc4
     ├── keys
     │   └── default
-    ├── manifest
+    ├── atavachron-manifest
     └── snapshots
         └── 83f992ba4df155eef874b4708799a1a03d0bd1954b25802ddeb497053a0cc745
 
