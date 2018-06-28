@@ -39,8 +39,8 @@ import           Atavachron.Store (Store(..))
 import qualified Atavachron.Store as Store
 
 
-newS3Store :: Region -> BucketName -> Store
-newS3Store region bucketName = Store{..}
+newS3Store :: Text -> Region -> BucketName -> Store
+newS3Store name region bucketName = Store{..}
   where
 
     list :: Store.Path -> Stream (Of Store.Key) IO ()
@@ -58,8 +58,8 @@ newS3Store region bucketName = Store{..}
     hasKey key = doesObjectExist region bucketName (toObjectKey key)
 
     toObjectKey :: Store.Key -> ObjectKey
-    toObjectKey (Store.Key (Store.Path prefix) name) =
-        ObjectKey $ prefix <> "/" <> name
+    toObjectKey (Store.Key (Store.Path prefix) k) =
+        ObjectKey $ prefix <> "/" <> k
 
     fromObjectKey :: Store.Path -> ObjectKey -> Maybe Store.Key
     fromObjectKey path@(Store.Path prefix) key =

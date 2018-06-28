@@ -7,6 +7,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -55,6 +56,10 @@ import Atavachron.Env
 import Atavachron.Pipelines
 import Atavachron.Streaming (mkTaskGroup)
 import qualified Atavachron.Streaming as S
+import Atavachron.Store (Store)
+import qualified Atavachron.Store as Store
+import qualified Atavachron.Store.LocalFS as Store
+import qualified Atavachron.Store.S3 as Store
 
 type FileGlob = Text
 
@@ -72,45 +77,45 @@ data Command
 -- Wherefore art thou OverloadedRecordLabels?
 
 data InitOptions = InitOptions
-    { iRepoURL     :: Text
+    { iRepoURL     :: URL
     }
 
 data BackupOptions = BackupOptions
-    { bRepoURL     :: Text
+    { bRepoURL     :: URL
     , bSourceDir   :: Text
     , bGlobPair    :: GlobPair
     }
 
 data VerifyOptions = VerifyOptions
-    { vRepoURL     :: Text
+    { vRepoURL     :: URL
     , vSnapshotID  :: SnapshotName
     , vGlobPair    :: GlobPair
     }
 
 data RestoreOptions = RestoreOptions
-    { rRepoURL     :: Text
+    { rRepoURL     :: URL
     , rSnapshotID  :: SnapshotName
     , rTargetDir   :: Text
     , rGlobPair    :: GlobPair
     }
 data SnapshotOptions = SnapshotOptions
-    { sRepoURL     :: Text
+    { sRepoURL     :: URL
     }
 
 data ListOptions = ListOptions
-    { lRepoURL     :: Text
+    { lRepoURL     :: URL
     , lSnapshotID  :: SnapshotName
     , lGlobPair    :: GlobPair
     }
 
 data DiffOptions = DiffOptions
-    { dRepoURL     :: Text
-    , dSnapshotID1 :: Text
-    , dSnapshotID2 :: Text
+    { dRepoURL     :: URL
+    , dSnapshotID1 :: SnapshotName
+    , dSnapshotID2 :: SnapshotName
     }
 
 data KeyOptions = KeyOptions
-    { kRepoURL     :: Text
+    { kRepoURL     :: URL
     , kArgument    :: KeysArgument
     }
 
@@ -122,6 +127,8 @@ data GlobPair = GlobPair
     { includeGlob :: Maybe FileGlob
     , excludeGlob :: Maybe FileGlob
     }
+
+newtype URL = URL { urlText :: Text }
 
 noGlobs :: GlobPair
 noGlobs = GlobPair Nothing Nothing
@@ -140,30 +147,35 @@ runCommand (CKeys options)      = keys options
 
 initialise :: InitOptions -> IO ()
 initialise InitOptions{..} = do
-    pass <- newPassword
-    cc   <- Repository.initRepository iRepoURL pass
-    saveCredentials iRepoURL cc
-    T.putStrLn $ "Repository created at " <> iRepoURL
+    store <- parseURL' iRepoURL
+    pass  <- newPassword
+    cc    <- Repository.initRepository store pass
+    let url = urlText iRepoURL
+    saveCredentials url cc
+    T.putStrLn $ "Repository created at " <> url
 
 backup :: BackupOptions -> IO ()
 backup BackupOptions{..} = do
     sourceDir <- parseAbsDir' bSourceDir
-    repo      <- authenticate bRepoURL
+    store     <- parseURL'    bRepoURL
+    repo      <- authenticate store
     runBackup repo sourceDir bGlobPair
     T.putStrLn $ "Backup complete."
 
 verify :: VerifyOptions -> IO ()
 verify VerifyOptions{..} = do
-    repo      <- authenticate vRepoURL
-    snap      <- getSnapshot repo  vSnapshotID
+    store     <- parseURL'    vRepoURL
+    repo      <- authenticate store
+    snap      <- getSnapshot  repo  vSnapshotID
     runVerify repo snap vGlobPair
     T.putStrLn $ "Verification complete."
 
 restore :: RestoreOptions -> IO ()
 restore RestoreOptions{..} = do
+    store     <- parseURL'    rRepoURL
     targetDir <- parseAbsDir' rTargetDir
-    repo      <- authenticate rRepoURL
-    snap      <- getSnapshot repo rSnapshotID
+    repo      <- authenticate store
+    snap      <- getSnapshot  repo rSnapshotID
     runRestore repo snap targetDir rGlobPair
     T.putStrLn $ "Restore complete."
 
@@ -175,7 +187,8 @@ list ListOptions{..} = listFiles lRepoURL lSnapshotID lGlobPair
 
 diff :: DiffOptions -> IO ()
 diff DiffOptions{..} = do
-    repo      <- authenticate dRepoURL
+    store     <- parseURL'    dRepoURL
+    repo      <- authenticate store
     env       <- makeEnv repo rootDir noGlobs
     snap1     <- getSnapshot repo dSnapshotID1
     snap2     <- getSnapshot repo dSnapshotID2
@@ -198,9 +211,10 @@ keys KeyOptions{..} =
         ListKeys    -> listAccessKeys kRepoURL
         AddKey name -> addAccessKey kRepoURL name
 
-listSnapshots :: Text -> IO ()
+listSnapshots :: URL -> IO ()
 listSnapshots repoURL = do
-    repo      <- authenticate repoURL
+    store     <- parseURL'    repoURL
+    repo      <- authenticate store
     flip S.mapM_ (Repository.listSnapshots repo) $ \(key, e'snap) ->
         case e'snap of
             Left ex            ->
@@ -215,11 +229,12 @@ listSnapshots repoURL = do
                        (show sStartTime)
                        (show sFinishTime)
 
-listFiles :: Text -> SnapshotName -> GlobPair -> IO ()
+listFiles :: URL -> SnapshotName -> GlobPair -> IO ()
 listFiles repoURL partialKey globs = do
-    repo <- authenticate repoURL
-    env  <- makeEnv repo rootDir globs
-    snap <- liftIO $ getSnapshot repo partialKey
+    store <- parseURL'    repoURL
+    repo  <- authenticate store
+    env   <- makeEnv repo rootDir globs
+    snap  <- liftIO $ getSnapshot repo partialKey
     runResourceT
         . flip evalStateT initialProgress
         . flip runReaderT env
@@ -234,19 +249,21 @@ listFiles repoURL partialKey globs = do
         putStrLn fp
         -- forM_ chunks $ T.putStrLn . hexEncode
 
-listAccessKeys :: Text -> IO ()
+listAccessKeys :: URL -> IO ()
 listAccessKeys repoURL = do
-    repo      <- authenticate repoURL
+    store <- parseURL'    repoURL
+    repo  <- authenticate store
     S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
 
-addAccessKey :: Text -> Text -> IO ()
+addAccessKey :: URL -> Text -> IO ()
 addAccessKey repoURL name = do
+    store <- parseURL' repoURL
     T.putStrLn "Checking existing credentials."
-    repo <- authenticate repoURL
+    repo  <- authenticate store
     T.putStrLn "Please provide the additional credentials."
-    pass <- newPassword
-    cc   <- Repository.newAccessKey (repoStore repo) (repoManifestKey repo) name pass
-    saveCredentials repoURL cc
+    pass  <- newPassword
+    cc    <- Repository.newAccessKey (repoStore repo) (repoManifestKey repo) name pass
+    saveCredentials (urlText repoURL) cc
 
 runBackup :: Repository -> Path Abs Dir -> GlobPair -> IO ()
 runBackup repo sourceDir globs = do
@@ -286,24 +303,24 @@ runRestore repo snapshot targetDir globs = do
         . flip runReaderT env
         $ restoreFiles snapshot
 
-authenticate :: Text -> IO Repository
-authenticate repoURL = do
+authenticate :: Store -> IO Repository
+authenticate store = do
     -- check for cached credentials
-    m'cc <- loadCredentials repoURL
+    m'cc <- loadCredentials (Store.name store)
     case m'cc of
-        Nothing -> newCredentials repoURL
-        Just cc -> Repository.authenticate' repoURL cc
+        Nothing -> newCredentials store
+        Just cc -> Repository.authenticate' store cc
 
-newCredentials :: Text -> IO Repository
-newCredentials repoURL = do
+newCredentials :: Store -> IO Repository
+newCredentials store = do
     pass       <- askPassword
-    (repo, cc) <- Repository.authenticate repoURL pass
-    repo <$ saveCredentials repoURL cc
+    (repo, cc) <- Repository.authenticate store pass
+    repo <$ saveCredentials (Store.name store) cc
 
 loadCredentials :: Text -> IO (Maybe CachedCredentials)
-loadCredentials repoURL = do
+loadCredentials urlText = do
     cachePath <- getCachePath
-    filePath  <- mkCacheFileName cachePath repoURL "credentials" >>= getFilePath
+    filePath  <- mkCacheFileName cachePath urlText "credentials" >>= getFilePath
     exists    <- Files.fileExist filePath
     if exists
         then do debug' $ "Using cached credentials."
@@ -311,9 +328,9 @@ loadCredentials repoURL = do
         else    return Nothing
 
 saveCredentials :: Text -> CachedCredentials -> IO ()
-saveCredentials repoURL cc = do
+saveCredentials urlText cc = do
     cachePath <- getCachePath
-    filePath  <- mkCacheFileName cachePath repoURL "credentials" >>= getFilePath
+    filePath  <- mkCacheFileName cachePath urlText "credentials" >>= getFilePath
     LB.writeFile filePath (serialise cc)
     Files.setFileMode filePath (Files.ownerReadMode `Files.unionFileModes` Files.ownerWriteMode)
     T.putStrLn $ "Credentials cached at " <> T.pack filePath
@@ -373,6 +390,26 @@ parseGlob g = FilePredicate $ \path ->
         match patt <$> getFilePath path
   where
     patt = simplify $ compile $ T.unpack g
+
+-- TODO move URL parsing logic to each individual store?
+parseURL :: URL -> IO (Either Text Store)
+parseURL URL{..} =
+    case "://" `T.breakOn` urlText of
+        ("file",  T.unpack . T.drop 3 -> rest) -> do
+            m'path <- return $ parseAbsDir rest
+            return $ case m'path of
+                Nothing   -> Left $ "Cannot parse file URL: " <> urlText
+                Just path -> Right $ Store.newLocalFS urlText path
+        ("s3", T.drop 3 -> rest) ->
+            return $ case Store.parseS3URL rest of
+                Nothing   -> Left $ "Cannot parse S3 URL: " <> urlText
+                Just (region, bucketName) -> Right $ Store.newS3Store urlText region bucketName
+        _ -> return $ Left $ "Cannot parse URL: " <> urlText
+
+-- a version that blows up
+parseURL' :: URL -> IO Store
+parseURL' repoURL =
+    either (errorL' . ("Cannot parse URL: "<>)) id <$> parseURL repoURL
 
 newPassword :: IO Text
 newPassword = do

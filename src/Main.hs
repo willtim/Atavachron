@@ -112,8 +112,8 @@ excludeGlobP = optional $ strOption
   <> metavar "PATTERN"
   <> help "Exclude any files matching PATTERN" )
 
-repoUrlP :: Parser Text
-repoUrlP = strOption
+repoUrlP :: Parser URL
+repoUrlP = URL <$> strOption
   (  long "repository"
   <> short 'r'
   <> metavar "REPO-URL"

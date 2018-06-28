@@ -33,7 +33,7 @@ To test atavachron, we can initialise a local filesystem repository:
 
 To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would use:
 
-    $ atavachron backup -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
+    $ atavachron backup -r file:///home/tim/test-repo -d /home/tim/Pictures/Wallpaper
     Files: 36  |  Chunks: 37  |  In: 50 MB  |  Out (dedup): 50 MB  |  Out (stored):  50 MB  |  Rate: 37 MB/s  |  Errors: 0
     Wrote snapshot 107ee7fd
 
@@ -41,7 +41,7 @@ To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would
 
 To list all snapshots, we provide the command 'snapshots' together with the mandatory repository option '-r':
 
-    $ atavachron snapshots -r file:/home/tim/test-repo
+    $ atavachron snapshots -r file:///home/tim/test-repo
     107ee7fd | tim      | x1c      | /home/tim/Pictures/Wallpaper     | 2018-06-15 07:16 | 2018-06-15 07:16
 
 To list all files within a snapshot, we provide the command 'list' together with a snapshot ID.  We only need to specify enough of the snapshot ID to avoid ambiguity:
@@ -52,25 +52,25 @@ To list all files within a snapshot, we provide the command 'list' together with
 
 Files from a snapshot can be selectively restored to a target directory on the local filesystem. For example:
 
-    $ atavachron restore 107 -r file:/home/tim/test-repo -i '**/*' -d /home/tim/tmp
+    $ atavachron restore 107 -r file:///home/tim/test-repo -i '**/*' -d /home/tim/tmp
 
 ### Verifying
 
 Verification is similar to a restore. It will download all chunks from a repository and decode them, using cryptographic authentication to guarantee the integrity of each chunk, but it will not reconstitute the associated files to disk. It is used to test that the integrity of the data in the remote repository.
 
-    $ atavachron verify 107 -r file:/home/tim/test-repo
+    $ atavachron verify 107 -r file:///home/tim/test-repo
 
 ### Add an additional access key
 
 To create an additional access key with its own password, use the following:
 
-    $ atavachron keys --add karen -r file:/home/tim/test-repo
+    $ atavachron keys --add karen -r file:///home/tim/test-repo
 
 Note that currently keys can only be revoked by deleting them manually from the Store, e.g. by using the Amazon S3 dashboard.
 
 ### Backing up to Amazon S3
 
-To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional hostname and bucket. A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Currently the credentials must be provided in an ".s3cfg" configuration file.
+To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional endpoint and bucket. A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Currently the credentials must be provided in an ".s3cfg" configuration file.
 
     $ atavachron backup -r s3://s3-eu-west-2.amazonaws.com/<bucket-name> -d /home/tim/Pictures
 

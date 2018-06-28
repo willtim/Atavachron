@@ -2,6 +2,7 @@
 
 -- | An abstract store interface, for potentially providing multiple
 -- remote repository implementations.
+-- This module should be imported qualified.
 
 module Atavachron.Store where
 
@@ -27,7 +28,8 @@ data Key = Key
 -- | An external, likely remote, store.
 -- NOTE: get and put are restricted to objects less than 10MB.
 data Store = Store
-  { list   :: Path -> Stream' Key IO ()
+  { name   :: Text -- typically a URL
+  , list   :: Path -> Stream' Key IO ()
   , get    :: Key  -> IO LB.ByteString
   , put    :: Key  -> LB.ByteString -> IO ()
   , hasKey :: Key  -> IO Bool

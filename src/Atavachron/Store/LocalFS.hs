@@ -6,6 +6,7 @@ module Atavachron.Store.LocalFS where
 
 import Control.Monad.IO.Class
 
+import Data.Text (Text)
 import qualified Data.Text as T
 
 import qualified Data.ByteString.Lazy as LB
@@ -19,14 +20,14 @@ import Atavachron.Streaming (Stream')
 import qualified Streaming.Prelude as S
 
 
-newLocalFS :: Path Abs Dir -> Store
-newLocalFS root = Store{..}
+newLocalFS :: Text -> Path Abs Dir -> Store
+newLocalFS name root = Store{..}
   where
 
     list :: Store.Path -> Stream' Store.Key IO ()
-    list path@(Store.Path name) = do
+    list path@(Store.Path p) = do
         liftIO $ ensureSubdir path
-        dirName <- liftIO $ (</> T.unpack name) <$> getFilePath root
+        dirName <- liftIO $ (</> T.unpack p) <$> getFilePath root
         entries <- liftIO $ Dir.listDirectory dirName
         S.each $ map (Store.Key path . T.pack) entries
 
@@ -49,10 +50,10 @@ newLocalFS root = Store{..}
         Dir.doesFileExist fileName
 
     keyToFileName :: Store.Key -> IO FilePath
-    keyToFileName (Store.Key (Store.Path prefix) name) =
-        (</> T.unpack prefix </> T.unpack name) <$> getFilePath root
+    keyToFileName (Store.Key (Store.Path prefix) k) =
+        (</> T.unpack prefix </> T.unpack k) <$> getFilePath root
 
     ensureSubdir :: Store.Path -> IO ()
-    ensureSubdir (Store.Path name) = do
-        dir <- (</> T.unpack name) <$> getFilePath root
+    ensureSubdir (Store.Path p) = do
+        dir <- (</> T.unpack p) <$> getFilePath root
         Dir.createDirectoryIfMissing True dir

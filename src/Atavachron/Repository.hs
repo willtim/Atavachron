@@ -71,8 +71,6 @@ import Atavachron.Path
 import Atavachron.Streaming
 import Atavachron.Store (Store, Key)
 import qualified Atavachron.Store as Store
-import qualified Atavachron.Store.LocalFS as Store
-import qualified Atavachron.Store.S3 as Store
 
 
 -- | Represents a remote repository used to backup files to.
@@ -290,10 +288,9 @@ putSnapshot repo snapshot = do
 
     return $ const (Store.kName key) <$> res
 
--- | Initialise a repository using the supplied URL and password.
-initRepository :: Text -> Text -> IO CachedCredentials
-initRepository repoURL pass = do
-    store       <- either (errorL' . ("Cannot parse URL: "<>)) id <$> parseURL repoURL
+-- | Initialise a repository using the supplied store and password.
+initRepository :: Store -> Text -> IO CachedCredentials
+initRepository store pass = do
     hasManifest <- Store.hasKey store manifestStoreKey
     when hasManifest $
         errorL' "URL already hosts a repository"
@@ -319,11 +316,9 @@ newAccessKey store manifestKey name pass = do
         <$> putAccessKey store name (AccessKey salt ciphertext)
     return $ CachedCredentials key name
 
--- | Get repository access using the supplied password.
-authenticate :: Text -> Text -> IO (Repository, CachedCredentials)
-authenticate  repoURL pass = do
-    store       <- either (errorL' . ("Cannot parse URL: "<>)) id
-                   <$> parseURL repoURL
+-- | Get repository access using the supplied store and password.
+authenticate :: Store -> Text -> IO (Repository, CachedCredentials)
+authenticate store pass = do
     hasManifest <- Store.hasKey store manifestStoreKey
     unless hasManifest $
         errorL' $ "Could not find a repository at the supplied URL"
@@ -332,7 +327,7 @@ authenticate  repoURL pass = do
     let keyStr = listAccessKeys store
     (manifestKey, cc) <- fromMaybe (errorL' "Password does not match any stored!")
                <$> S.foldM_ tryPass (return Nothing) return keyStr
-    (,cc) <$> resolveRepository repoURL store manifestKey
+    (,cc) <$> resolveRepository store manifestKey
 
   where
     tryPass :: Maybe (ManifestKey, CachedCredentials)
@@ -349,11 +344,9 @@ authenticate  repoURL pass = do
              <$> (decryptBytes key akManifestKey >>= Saltine.decode)
     tryPass m _ = return m
 
--- | Get repository access using the supplied cached credentials.
-authenticate' :: Text -> CachedCredentials -> IO Repository
-authenticate' repoURL CachedCredentials{..} = do
-    store       <- either (errorL' . ("Cannot parse URL: "<>)) id
-                   <$> parseURL repoURL
+-- | Get repository access using the supplied store and cached credentials.
+authenticate' :: Store -> CachedCredentials -> IO Repository
+authenticate' store CachedCredentials{..} = do
     hasManifest <- Store.hasKey store manifestStoreKey
     unless hasManifest $
         errorL' $ "Could not find a repository at the supplied URL"
@@ -365,16 +358,16 @@ authenticate' repoURL CachedCredentials{..} = do
             let manifestKey = maybe (errorL $ "Cached credentials do not match access key: " <> ccAccessKeyName)
                                     ManifestKey
                             $ (decryptBytes ccPasswordHash akManifestKey >>= Saltine.decode)
-            resolveRepository repoURL store manifestKey
+            resolveRepository store manifestKey
 
 -- Loads and decodes the Manifest
-resolveRepository :: Text -> Store -> ManifestKey -> IO Repository
-resolveRepository repoURL store manifestKey = do
+resolveRepository :: Store -> ManifestKey -> IO Repository
+resolveRepository store manifestKey = do
     manifest <- either (\ex -> errorL' $ "Cannot obtain manifest: " <> T.pack (show ex)) id
                      . (>>= decrypt (unManifestKey manifestKey) (toException ManifestDecryptFailed))
                    <$> try (Store.get store manifestStoreKey)
     return Repository
-        { repoURL         = repoURL
+        { repoURL         = Store.name store
         , repoStore       = store
         , repoManifestKey = manifestKey
         , repoManifest    = manifest
@@ -406,23 +399,6 @@ getAccessKey store name = (>>= deserialise') <$> try (Store.get store key)
 -- NOTE: allows overwriting an existing entry.
 putAccessKey :: Store -> AccessKeyName -> AccessKey -> IO (Either SomeException ())
 putAccessKey store name = try . Store.put store (Store.Key keysPath name) . serialise
-
--- TODO
-parseURL :: Text -> IO (Either Text Store)
-parseURL repoDir =
-    case ":" `T.breakOn` repoDir of
-        ("file", T.unpack -> _:rest) -> do
-            m'path <- return $ parseAbsDir rest
-            return $ case m'path of
-                Nothing   -> Left $ "Cannot parse file URL: " <> repoDir
-                Just path -> Right $ Store.newLocalFS path
-        ("s3", T.drop 1 -> rest)   ->
-            return $ case Store.parseS3URL rest of
-                Nothing   -> Left $ "Cannot parse S3 URL: " <> repoDir
-                Just (region, bucketName) -> Right $ Store.newS3Store region bucketName
-
-
-        _ -> return $ Left $ "Cannot parse URL: " <> repoDir
 
 deserialise' :: Serialise a => LB.ByteString -> Either SomeException a
 deserialise' = mapLeft toException . deserialiseOrFail

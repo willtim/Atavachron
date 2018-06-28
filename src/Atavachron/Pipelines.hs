@@ -79,7 +79,6 @@ import Atavachron.Files
 ------------------------------------------------------------
 -- Pipelines
 
-
 -- | Full and incremental backup.
 backupPipeline
     :: (MonadReader Env m, MonadState Progress m, MonadResource m)
@@ -97,7 +96,6 @@ backupPipeline
     . filterItems id
     . recurseDir
 
-
 -- | Verify files and their chunks.
 verifyPipeline
     :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
@@ -109,7 +107,6 @@ verifyPipeline
   . S.lefts
   . filterItems fst
   . snapshotTree
-
 
 -- | Restore (using the FilePredicate in the environment).
 restoreFiles
@@ -126,7 +123,6 @@ restoreFiles
         )
   . filterItems fst
   . snapshotTree
-
 
 -- | The complete upload pipeline: CDC chunking, encryption,
 -- compression and upload to remote location.
@@ -198,7 +194,6 @@ progressMonitor = S.mapM_ $ \_ -> do
     rate bytes ndt = round $ (toRational $ bytes `div` megabyte) / (toRational ndt) :: Int
     megabyte = 1024*1024
 
-
 overFileItems
     :: Monad m
     => (b -> FileItem)
@@ -210,7 +205,6 @@ overFileItems getFileItem f =
     fileElems = pathElems . filePath . getFileItem
     otherElems (DirItem item)    = pathElems (filePath item)
     otherElems (LinkItem item _) = pathElems (filePath item)
-
 
 -- | Apply the FilePredicate to the supplied tree metadata and
 -- filter out files/directories for backup or restore.
@@ -231,7 +225,6 @@ filterItems extract str = do
         Right (LinkItem item _) -> apply item
         Right (DirItem item)    -> apply item
 
-
 -- | Report errors during restore and log affected files.
 -- Perhaps in the future we can record broken files and missing chunks
 -- then we can give them special names in saveFiles? For now, just abort.
@@ -245,7 +238,6 @@ handleErrors = S.mapM $ \case
             <> T.pack (show errKind)
             <> maybe mempty (T.pack . show) errCause
     Right chunk    -> return chunk
-
 
 -- | Apply the supplied stream transform @f@ to the inserts
 -- and changes only.
@@ -272,7 +264,6 @@ overChangedFiles f
         g (Insert y) = Just $ Left y
         g (Change y) = Just $ Left y
         g (Delete _) = Nothing
-
 
 -- | Hash the supplied stream of chunks using multiple cores.
 hashChunks
@@ -309,7 +300,6 @@ dedupChunks str = do
                return $ Left c
     release key
     return r
-
 
 -- | Compress and encrypt the supplied stream of chunks using multiple cores.
 encodeChunks
@@ -358,9 +348,8 @@ storeChunk retries repo cc@Chunk{..} = do
     case res of
         Left (ex :: SomeException) ->
             errorL' $ "Failed to store chunk : " <> T.pack (show ex) -- fatal abort
-        Right isDuplicate -> return (cc, isDuplicate)
---            return (cOffsets, cStoreID)
-
+        Right isDuplicate ->
+            return (cc, isDuplicate)
 
 -- | Retrieve (download) a stream of chunks using multiple cores.
 retrieveChunks
@@ -392,14 +381,12 @@ retrieveChunk retries repo (offsets, storeID) = do
     mkCipherChunk = Chunk storeID offsets Nothing
     mkError = Error RetrieveError offsets storeID . Just
 
-
 rechunkCDC
   :: (MonadReader Env m, Eq t)
   => Stream' (RawChunk t B.ByteString) m r
   -> Stream' (RawChunk (TaggedOffsets t) B.ByteString) m r
 rechunkCDC str = asks (repoManifest . envRepository) >>= \Manifest{..} ->
     CDC.rechunkCDC mCDCKey mCDCParams str
-
 
 writeFilesCache
   :: (MonadReader Env m, MonadResource m)
@@ -413,7 +400,6 @@ writeFilesCache str = do
         . S.map (uncurry FileCacheEntry)
         $ S.copy str
 
-
 readFilesCache
   :: (MonadReader Env m, MonadResource m)
   => Stream' (FileItem, ChunkList) m ()
@@ -423,7 +409,6 @@ readFilesCache = do
     S.map (ceFileItem &&& ceChunkList)
         . absolutePaths sourceDir
         $ readCacheFile cacheFile
-
 
 getFilesCacheName :: MonadReader Env m => RawName -> m RawName
 getFilesCacheName prefix = do
@@ -503,7 +488,6 @@ snapshotChunkLists
     -> Stream' (Tree, ChunkList) m ()
 snapshotChunkLists = yield . (Tree,) . sTree
 
-
 unpackChunkLists
     :: forall m t r. (Eq t, Monad m)
     => Stream' (t, ChunkList) m r
@@ -537,7 +521,6 @@ trimChunks
          then (0, RawChunk item $ B.take (fromIntegral $ fileSize item - accumSize) bs)
          else (accumSize', RawChunk item bs)
 
-
 -- | Decode chunks using multiple cores.
 decodeChunks
     :: (MonadReader Env m, MonadState Progress m, MonadIO m)
@@ -554,7 +537,6 @@ decodeChunks str = do
             $ cc
   where
     toError Chunk{..} = Error DecryptError cOffsets cStoreID Nothing
-
 
 -- | We cannot survive errors retrieving the snapshot metadata.
 abortOnError
