@@ -59,13 +59,14 @@ import qualified Atavachron.Streaming as S
 type FileGlob = Text
 
 data Command
-  = CInit    InitOptions
-  | CBackup  BackupOptions
-  | CVerify  VerifyOptions
-  | CRestore RestoreOptions
-  | CList    ListOptions
-  | CDiff    DiffOptions
-  | CKeys    KeyOptions
+  = CInit      InitOptions
+  | CBackup    BackupOptions
+  | CVerify    VerifyOptions
+  | CRestore   RestoreOptions
+  | CSnapshots SnapshotOptions
+  | CList      ListOptions
+  | CDiff      DiffOptions
+  | CKeys      KeyOptions
 --  | Help
 
 -- Wherefore art thou OverloadedRecordLabels?
@@ -75,33 +76,32 @@ data InitOptions = InitOptions
     }
 
 data BackupOptions = BackupOptions
-    { bSourceDir   :: Text
-    , bRepoURL     :: Text
+    { bRepoURL     :: Text
+    , bSourceDir   :: Text
     , bGlobPair    :: GlobPair
     }
 
 data VerifyOptions = VerifyOptions
-    { vSnapshotID  :: Text
-    , vRepoURL     :: Text
+    { vRepoURL     :: Text
+    , vSnapshotID  :: SnapshotName
     , vGlobPair    :: GlobPair
     }
 
 data RestoreOptions = RestoreOptions
-    { rSnapshotID  :: Text
-    , rRepoURL     :: Text
+    { rRepoURL     :: Text
+    , rSnapshotID  :: SnapshotName
     , rTargetDir   :: Text
     , rGlobPair    :: GlobPair
+    }
+data SnapshotOptions = SnapshotOptions
+    { sRepoURL     :: Text
     }
 
 data ListOptions = ListOptions
     { lRepoURL     :: Text
-    , lArgument    :: ListArgument
+    , lSnapshotID  :: SnapshotName
+    , lGlobPair    :: GlobPair
     }
-
-data ListArgument
-    = ListSnapshots
-    | ListAccessKeys
-    | ListFiles SnapshotName GlobPair
 
 data DiffOptions = DiffOptions
     { dRepoURL     :: Text
@@ -115,7 +115,8 @@ data KeyOptions = KeyOptions
     }
 
 data KeysArgument
-    = AddKey Text
+    = ListKeys
+    | AddKey Text
 
 data GlobPair = GlobPair
     { includeGlob :: Maybe FileGlob
@@ -126,13 +127,14 @@ noGlobs :: GlobPair
 noGlobs = GlobPair Nothing Nothing
 
 runCommand :: Command -> IO ()
-runCommand (CInit options)    = initialise options
-runCommand (CBackup options)  = backup options
-runCommand (CVerify options)  = verify options
-runCommand (CRestore options) = restore options
-runCommand (CList options)    = list options
-runCommand (CDiff options)    = diff options
-runCommand (CKeys options)    = keys options
+runCommand (CInit options)      = initialise options
+runCommand (CBackup options)    = backup options
+runCommand (CVerify options)    = verify options
+runCommand (CRestore options)   = restore options
+runCommand (CSnapshots options) = snapshots options
+runCommand (CList options)      = list options
+runCommand (CDiff options)      = diff options
+runCommand (CKeys options)      = keys options
 
 ------------------------------------------------------------
 
@@ -165,12 +167,11 @@ restore RestoreOptions{..} = do
     runRestore repo snap targetDir rGlobPair
     T.putStrLn $ "Restore complete."
 
+snapshots :: SnapshotOptions -> IO ()
+snapshots SnapshotOptions{..} = listSnapshots sRepoURL
+
 list :: ListOptions -> IO ()
-list ListOptions{..} = do
-    case lArgument of
-        ListSnapshots              -> listSnapshots lRepoURL
-        ListAccessKeys             -> listAccessKeys lRepoURL
-        ListFiles partialKey globs -> listFiles lRepoURL partialKey globs
+list ListOptions{..} = listFiles lRepoURL lSnapshotID lGlobPair
 
 diff :: DiffOptions -> IO ()
 diff DiffOptions{..} = do
@@ -194,6 +195,7 @@ diff DiffOptions{..} = do
 keys :: KeyOptions -> IO ()
 keys KeyOptions{..} =
     case kArgument of
+        ListKeys    -> listAccessKeys kRepoURL
         AddKey name -> addAccessKey kRepoURL name
 
 listSnapshots :: Text -> IO ()
@@ -213,11 +215,6 @@ listSnapshots repoURL = do
                        (show sStartTime)
                        (show sFinishTime)
 
-listAccessKeys :: Text -> IO ()
-listAccessKeys repoURL = do
-    repo      <- authenticate repoURL
-    S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
-
 listFiles :: Text -> SnapshotName -> GlobPair -> IO ()
 listFiles repoURL partialKey globs = do
     repo <- authenticate repoURL
@@ -236,6 +233,11 @@ listFiles repoURL partialKey globs = do
         fp <- getFilePath (relativise rootDir $ filePath item)
         putStrLn fp
         -- forM_ chunks $ T.putStrLn . hexEncode
+
+listAccessKeys :: Text -> IO ()
+listAccessKeys repoURL = do
+    repo      <- authenticate repoURL
+    S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
 
 addAccessKey :: Text -> Text -> IO ()
 addAccessKey repoURL name = do

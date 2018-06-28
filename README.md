@@ -39,9 +39,9 @@ To backup the folder '/home/tim/Pictures/Wallpaper' to this repository, we would
 
 ### Listing
 
-To list all snapshots, we provide the command 'list' together with the '--snapshots' flag:
+To list all snapshots, we provide the command 'snapshots' together with the mandatory repository option '-r':
 
-    $ atavachron list --snapshots -r file:/home/tim/test-repo -d /home/tim/Pictures/Wallpaper
+    $ atavachron snapshots -r file:/home/tim/test-repo
     107ee7fd | tim      | x1c      | /home/tim/Pictures/Wallpaper     | 2018-06-15 07:16 | 2018-06-15 07:16
 
 To list all files within a snapshot, we provide the command 'list' together with a snapshot ID.  We only need to specify enough of the snapshot ID to avoid ambiguity:
@@ -72,7 +72,7 @@ Note that currently keys can only be revoked by deleting them manually from the 
 
 To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional hostname and bucket. A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Currently the credentials must be provided in an ".s3cfg" configuration file.
 
-    $ atavachron backup -r s3:s3-eu-west-2.amazonaws.com/<bucket-name> -d /home/tim/Pictures
+    $ atavachron backup -r s3://s3-eu-west-2.amazonaws.com/<bucket-name> -d /home/tim/Pictures
 
 
 ## Repository structure

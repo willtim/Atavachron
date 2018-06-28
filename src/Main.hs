@@ -21,14 +21,15 @@ data Options = Options
 optionsP :: Parser Options
 optionsP = Options
   <$> subparser
-    (  command "init"    (info initOptionsP    ( progDesc "Initialise a new repository." ))
-    <> command "backup"  (info backupOptionsP  ( progDesc "Create and upload a new snapshot to the repository." ))
-    <> command "verify"  (info verifyOptionsP  ( progDesc "Verify the integrity of a snapshot and its files in the repository." ))
-    <> command "restore" (info restoreOptionsP ( progDesc "Restore files from a snapshot to a target directory." ))
-    <> command "list"    (info listOptionsP    ( progDesc "List snapshots, files or access keys." ))
-    <> command "diff"    (info diffOptionsP    ( progDesc "Diff two snapshots." ))
-    <> command "keys"    (info keyOptionsP     ( progDesc "Management of password-protected access keys."))
-    -- <> command "help"   (info helpOptionsP   ( progDesc "Help for a particular command"))
+    (  command "init"      (info initOptionsP     ( progDesc "Initialise a new repository." ))
+    <> command "backup"    (info backupOptionsP   ( progDesc "Create and upload a new snapshot to the repository." ))
+    <> command "verify"    (info verifyOptionsP   ( progDesc "Verify the integrity of a snapshot and its files in the repository." ))
+    <> command "restore"   (info restoreOptionsP  ( progDesc "Restore files from a snapshot to a target directory." ))
+    <> command "snapshots" (info snapshotOptionsP ( progDesc "List snapshots in the repository." ))
+    <> command "list"      (info listOptionsP     ( progDesc "List files for a particuler snapshot." ))
+    <> command "diff"      (info diffOptionsP     ( progDesc "Diff two snapshots." ))
+    <> command "keys"      (info keyOptionsP      ( progDesc "Management of password-protected access keys."))
+    -- <> command "help"      (info helpOptionsP    ( progDesc "Help for a particular command"))
     )
   <*> logLevelP
 
@@ -41,19 +42,19 @@ initOptionsP :: Parser Command
 initOptionsP = CInit <$> (InitOptions <$> repoUrlP)
 
 backupOptionsP :: Parser Command
-backupOptionsP = CBackup <$> (BackupOptions <$> sourceDirP <*> repoUrlP <*> globPairP)
+backupOptionsP = CBackup <$> (BackupOptions <$> repoUrlP <*> sourceDirP <*> globPairP)
 
 verifyOptionsP :: Parser Command
-verifyOptionsP = CVerify <$> (VerifyOptions <$> snapIdP <*> repoUrlP <*> globPairP)
+verifyOptionsP = CVerify <$> (VerifyOptions <$> repoUrlP <*> snapIdP <*> globPairP)
 
 restoreOptionsP :: Parser Command
-restoreOptionsP = CRestore <$> (RestoreOptions <$> snapIdP <*> repoUrlP <*> targetDirP <*> globPairP)
+restoreOptionsP = CRestore <$> (RestoreOptions <$> repoUrlP <*> snapIdP <*> targetDirP <*> globPairP)
+
+snapshotOptionsP :: Parser Command
+snapshotOptionsP = CSnapshots <$> (SnapshotOptions <$> repoUrlP)
 
 listOptionsP :: Parser Command
-listOptionsP = CList <$> (ListOptions <$> repoUrlP <*> listArgP)
-
-listArgP :: Parser ListArgument
-listArgP = listSnapshotsP <|> listAccessKeysP <|> listFilesP
+listOptionsP = CList <$> (ListOptions <$> repoUrlP <*> snapIdP <*> globPairP)
 
 diffOptionsP :: Parser Command
 diffOptionsP = CDiff <$> (DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP)
@@ -62,23 +63,15 @@ keyOptionsP :: Parser Command
 keyOptionsP = CKeys <$> (KeyOptions <$> repoUrlP <*> keysArgP)
 
 keysArgP :: Parser KeysArgument
-keysArgP = addKeyP
-
-listSnapshotsP :: Parser ListArgument
-listSnapshotsP = flag' ListSnapshots
-  (  long "snapshots"
-  <> help "List snapshots" )
-
-listAccessKeysP :: Parser ListArgument
-listAccessKeysP = flag' ListAccessKeys
-  (  long "keys"
-  <> help "List access keys" )
-
-listFilesP :: Parser ListArgument
-listFilesP = ListFiles <$> snapIdP <*> globPairP
+keysArgP = listKeysP <|> addKeyP
 
 globPairP :: Parser GlobPair
 globPairP = GlobPair <$> includeGlobP <*> excludeGlobP
+
+listKeysP :: Parser KeysArgument
+listKeysP = flag' ListKeys
+  (  long "list"
+  <> help "List access keys" )
 
 addKeyP :: Parser KeysArgument
 addKeyP = AddKey <$> strOption
