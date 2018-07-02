@@ -31,7 +31,8 @@ module Atavachron.Chunk.CDC
     , genHVs
     ) where
 
-import Control.Monad.State
+import Control.Monad
+import Control.Monad.Trans.Class
 
 import Codec.Serialise
 

@@ -16,7 +16,7 @@ module Atavachron.Chunk.Encode where
 import Codec.Serialise
 
 import Control.Arrow
-import Control.Monad.State
+import Control.Monad.IO.Class
 
 import Data.Maybe
 import Data.Text (Text)

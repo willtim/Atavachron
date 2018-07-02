@@ -25,7 +25,7 @@ import Control.Lens (over)
 import Control.Logging
 import Control.Monad
 import Control.Monad.Reader
-import Control.Monad.State
+import Control.Monad.State.Class
 import Control.Monad.Trans.Resource
 
 import Data.Binary.Get

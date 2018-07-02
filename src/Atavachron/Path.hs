@@ -11,10 +11,10 @@
 --
 -- The standard library FilePath (a synonym for String) is flawed, in
 -- that it takes the bytes returned by a POSIX system call and assumes
--- a default encoding when no encoding information was given. It is
--- also somewhat inefficient to re-allocate all this string data on
--- the Haskell heap, when instead one can just keep references to the
--- original returned bytes.
+-- a default encoding when no encoding information was given. The
+-- internal representation used here, maintains the path elements
+-- separately to avoid re-allocating string data when performing
+-- various path operations.
 
 module Atavachron.Path where
 

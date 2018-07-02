@@ -25,7 +25,7 @@ import Control.Exception
 import Control.Logging
 import Control.Monad
 import Control.Monad.Reader
-import Control.Monad.State
+import Control.Monad.State.Strict
 import Control.Monad.Trans.Resource
 
 import qualified Data.ByteString.Lazy as LB
