@@ -38,10 +38,9 @@ import Atavachron.Streaming
 
 -- | This uses POSIX read.
 fdGetContents
-    :: (MonadIO m)
-    => Fd
+    :: Fd
     -> Int -- ^ chunk size
-    -> Stream' B.ByteString m ()
+    -> Stream' B.ByteString IO ()
 fdGetContents fd sz = loop
   where
     loop = do

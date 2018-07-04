@@ -24,6 +24,7 @@ import Codec.Serialise
 import Control.Lens (over)
 import Control.Logging
 import Control.Monad
+import Control.Monad.Morph (hoist)
 import Control.Monad.Reader
 import Control.Monad.State.Class
 import Control.Monad.Trans.Resource
@@ -163,5 +164,5 @@ readFiles = S.concatMap $ \file -> do
 
         (key, fd) <- allocate (IO.openFd rfp IO.ReadOnly (Just Files.stdFileMode) IO.defaultFileFlags)
                               (IO.closeFd)
-        IO.fdGetContents fd $ (fromIntegral $ fileSize + 1) `min` 1048576 -- 1MB chunk size
+        hoist liftIO $ IO.fdGetContents fd $ (fromIntegral $ fileSize + 1) `min` 1048576 -- 1MB chunk size
         release key
