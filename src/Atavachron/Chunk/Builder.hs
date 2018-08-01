@@ -28,6 +28,7 @@ import qualified Data.ByteString.Builder as BB
 import Streaming.Prelude (next)
 import qualified Streaming.Prelude as S
 
+import Data.Semigroup (Semigroup (..))
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 
@@ -44,6 +45,10 @@ data Builder t = Builder
   , bTaggedOffsets :: !(TaggedOffsets t)
   , bSize          :: !Int
   }
+
+instance Semigroup (Builder t) where
+  Builder bb1 ts1 s1 <> Builder bb2 ts2 s2 =
+    Builder (bb1 <> bb2) (ts1 <> ts2) (s1 + s2)
 
 instance Monoid (Builder t) where
     mempty = Builder mempty mempty 0
