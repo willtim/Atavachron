@@ -96,7 +96,7 @@ The repository structure is common to all store back-ends. At the root of the re
 
 ### Why not just use DropBox?
 
-The most important reason for me, which applies to most consumer cloud storage offerings, is the difficulty of integrating trustworthy client-side encryption. I also do not want bi-directional sync, which is a complex problem and difficult to get right. DropBox does offer online fine-grained incremental backup, sending changes to the cloud one file at a time. They also use de-duplication, but it is for their benefit only.
+The most important reason for me, which applies to most consumer cloud storage offerings, is the difficulty of integrating trustworthy client-side encryption. I also do not want bi-directional sync, which is a complex problem and difficult to get right (see [here](https://www.cis.upenn.edu/~bcpierce/papers/mysteriesofdropbox.pdf)). DropBox does offer online fine-grained incremental backup, sending changes to the cloud one file at a time. They also use de-duplication, but it is for their benefit only.
 Atavachron is a different point in the design space. In order to handle potentially huge amounts of files and maximise upload performance, it packs them into chunks. This also has the advantage of hiding the file sizes from the remote repository, which makes the encryption more secure. Atavachron backups are forever incremental, but there is potentially more cost in terms of storage space for each backup performed (depending on the chunk size chosen).
 
 ### Why not use an existing backup program for Amazon S3?
