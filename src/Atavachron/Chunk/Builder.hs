@@ -20,7 +20,6 @@ module Atavachron.Chunk.Builder
     , buildToSize
     ) where
 
-import Data.Monoid
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Builder as BB
@@ -52,8 +51,7 @@ instance Semigroup (Builder t) where
 
 instance Monoid (Builder t) where
     mempty = Builder mempty mempty 0
-    Builder bb ts s `mappend` Builder bb' ts' s' =
-        Builder (bb <> bb') (ts <> ts') (s + s')
+    bb1 `mappend` bb2 = bb1 <> bb2
 
 toByteString :: Builder t -> B.ByteString
 toByteString = L.toStrict . BB.toLazyByteString . bBuilder

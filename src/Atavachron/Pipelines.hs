@@ -31,7 +31,6 @@ import Control.Monad.Trans.Class
 import Control.Monad.Trans.Resource
 
 import Data.Function (on)
-import Data.Monoid
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Builder as Builder
