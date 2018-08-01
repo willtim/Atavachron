@@ -42,6 +42,7 @@ import Data.Time.Clock
 
 import qualified Data.List as List
 
+import Data.Semigroup (Semigroup(..))
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 
@@ -572,7 +573,7 @@ verifyChunks str = do
 
 newtype VerifyResult = VerifyResult
     { vrErrors :: Seq (Error FileItem)
-    } deriving (Show, Monoid)
+    } deriving (Show, Semigroup, Monoid)
 
 summariseErrors
     :: (MonadState Progress m, MonadIO m)
