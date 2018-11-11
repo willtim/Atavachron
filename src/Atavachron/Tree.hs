@@ -30,7 +30,6 @@ import qualified Data.ByteString.Lazy as LB
 import Data.Function (on)
 import Data.Int
 import Data.Maybe
-import Data.Monoid
 import qualified Data.List as List
 import Data.Ord (comparing)
 import qualified Data.Sequence as Seq

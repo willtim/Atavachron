@@ -10,7 +10,6 @@ import Control.Monad
 import Data.Bits
 import Data.Foldable (toList)
 import Data.Maybe
-import Data.Monoid
 import qualified Data.List as L
 
 import qualified Data.ByteString as B

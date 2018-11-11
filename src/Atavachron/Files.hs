@@ -33,7 +33,6 @@ import Data.Binary.Get
 import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as L8
-import Data.Monoid
 import qualified Data.Text as T
 
 import qualified Streaming.Prelude as S hiding (mapM_)

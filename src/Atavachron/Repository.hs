@@ -51,7 +51,6 @@ import qualified Crypto.Saltine.Internal.ByteSizes as ByteSizes
 import qualified Data.ByteString.Lazy as LB
 
 import Data.Maybe
-import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)

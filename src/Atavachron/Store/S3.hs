@@ -23,14 +23,12 @@ import           Data.Conduit
 import qualified Data.Conduit.Binary     as CB
 import qualified Data.Conduit.List       as CL
 import           Data.Maybe
-import           Data.Monoid
 import           Data.Text               (Text)
 import qualified Data.Text               as T
 
 import           Network.AWS.Data
 import           Network.AWS.S3
 import           Network.HTTP.Types.Status
--- import           System.IO
 
 import           Streaming (Stream, Of(..){-, hoist-})
 import qualified Streaming.Prelude       as S
@@ -84,10 +82,10 @@ listObjects'
 listObjects' r b p = do
 --    lgr <- newLogger Error stdout
     env <- newEnv Discover <&> {-set envLogger lgr .-} set envRegion r
-    runResourceT . runAWST env $
+    runResourceT . runAWST env . runConduit $
         paginate (set loPrefix (Just p) $ listObjects b)
-                =$= CL.concatMap (map (view oKey) . view lorsContents)
-                 $$ CL.consume
+                .| CL.concatMap (map (view oKey) . view lorsContents)
+                .| CL.consume
   -- where
   --   toStreaming :: Source m a -> Stream (Of a) m ()
   --   toStreaming src = hoist lift src $$ CL.mapM_ S.yield

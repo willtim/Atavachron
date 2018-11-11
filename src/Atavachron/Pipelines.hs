@@ -134,7 +134,7 @@ uploadPipeline
 uploadPipeline
     = packChunkLists
     . progressMonitor . S.copy
-    . S.merge
+    . S.mergeEither
     . S.left (storeChunks . encodeChunks)
     . dedupChunks
     . hashChunks
@@ -248,7 +248,7 @@ overChangedFiles
     -> Stream' (Diff (FileItem, c) FileItem) m r
     -> Stream' (FileItem, c) m r
 overChangedFiles f
-   = S.merge
+   = S.mergeEither
    . S.reinterleaveRights fileElems fileElems
    . S.left f
    . fromDiffs
@@ -581,7 +581,7 @@ summariseErrors
     -> Stream' (FileItem, VerifyResult) m r
 summariseErrors
   = groupByTag (foldMap fst)
-  . S.merge
+  . S.mergeEither
   . S.map (fromError +++ fromChunk)
   where
     fromError e = (errOffsets e, VerifyResult $ Seq.singleton e)

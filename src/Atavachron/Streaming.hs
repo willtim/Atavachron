@@ -132,11 +132,11 @@ rights
 rights = S.map (fromRight (error "rights: assertion failed"))
        . S.filter isRight
 
--- | merge stream of two outputs into one output.
-merge
+-- | merge stream of two outputs (@Either b b@) into one output.
+mergeEither
   :: Monad m
   => Stream' (Either b b) m r -> Stream' b m r
-merge = S.map (either id id)
+mergeEither = S.map (either id id)
 
 -- | The interleaving of items after using e.g. @left@ depends on the
 -- chunking when using non-synchronous streams.  This code buffers the

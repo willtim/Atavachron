@@ -23,8 +23,6 @@ import qualified Data.ByteString.Char8 as B8
 
 import Codec.Serialise
 
-import Data.Monoid
-
 import Data.Foldable
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq

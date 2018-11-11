@@ -15,7 +15,6 @@ module Atavachron.Chunk.Cache
 import           Prelude hiding (lookup)
 import           Control.Monad
 import qualified Data.Text as T
-import           Data.Monoid
 import           Database.SQLite3 (Database, Statement, SQLData(..))
 import qualified Database.SQLite3 as SQL
 

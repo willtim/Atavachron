@@ -13,7 +13,6 @@ import Control.Monad.Catch
 import Control.Monad.IO.Class
 
 import Data.Foldable
-import Data.Monoid
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Internal as BSI
 
