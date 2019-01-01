@@ -2,7 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
-
+{-# LANGUAGE ViewPatterns #-}
 -- | An S3 Store implementation for Atavachron.
 --
 
@@ -12,23 +12,29 @@ module Atavachron.Store.S3
     ) where
 
 import           Control.Arrow
-import           Control.Lens
-import           Control.Monad
+import           Control.Logging
 import           Control.Monad.Catch
 import           Control.Monad.IO.Class
-import           Control.Monad.Trans.AWS
-import           Data.Attoparsec.Text
+import           Control.Monad.Trans.Resource
 import qualified Data.ByteString.Lazy    as LB
 import           Data.Conduit
 import qualified Data.Conduit.Binary     as CB
-import qualified Data.Conduit.List       as CL
+import qualified Data.Ini                as INI
 import           Data.Maybe
 import           Data.Text               (Text)
 import qualified Data.Text               as T
+import qualified Data.Text.Encoding      as T
 
-import           Network.AWS.Data
-import           Network.AWS.S3
+import           Network.HTTP.Client
 import           Network.HTTP.Types.Status
+import           Network.HTTP.Conduit (newManager, tlsManagerSettings, responseBody)
+
+import qualified Aws
+import qualified Aws.Core as Aws
+import qualified Aws.S3 as S3
+
+import           System.Directory
+import           System.FilePath
 
 import           Streaming (Stream, Of(..){-, hoist-})
 import qualified Streaming.Prelude       as S
@@ -37,96 +43,155 @@ import           Atavachron.Store (Store(..))
 import qualified Atavachron.Store as Store
 
 
-newS3Store :: Text -> Region -> BucketName -> Store
-newS3Store name region bucketName = Store{..}
-  where
+type Config      = Aws.Configuration
+type Endpoint    = S3.S3Configuration Aws.NormalQuery
+type BucketName  = Text
+type ObjectKey   = Text
 
-    list :: Store.Path -> Stream (Of Store.Key) IO ()
-    list path@(Store.Path prefix) = do
-        keys <- liftIO $ listObjects' region bucketName prefix
-        S.each $ catMaybes $ map (fromObjectKey path) keys
+newS3Store :: Text -> Endpoint -> BucketName -> IO Store
+newS3Store name endpoint bucketName = do
+    cfg <- baseConfiguration
+    let params = (cfg, endpoint)
 
-    get :: Store.Key -> IO LB.ByteString
-    get key = getObject' region bucketName (toObjectKey key)
+        list :: Store.Path -> Stream (Of Store.Key) IO ()
+        list path@(Store.Path prefix) = do
+            keys <- liftIO $ listObjects' params bucketName prefix
+            S.each $ catMaybes $ map (fromObjectKey path) keys
 
-    put :: Store.Key -> LB.ByteString -> IO ()
-    put key bs = putObject' region bucketName (toObjectKey key) bs
+        get :: Store.Key -> IO LB.ByteString
+        get key = getObject' params bucketName (toObjectKey key)
 
-    hasKey :: Store.Key -> IO Bool
-    hasKey key = doesObjectExist region bucketName (toObjectKey key)
+        put :: Store.Key -> LB.ByteString -> IO ()
+        put key bs = putObject' params bucketName (toObjectKey key) bs
 
-    toObjectKey :: Store.Key -> ObjectKey
-    toObjectKey (Store.Key (Store.Path prefix) k) =
-        ObjectKey $ prefix <> "/" <> k
+        hasKey :: Store.Key -> IO Bool
+        hasKey key = doesObjectExist params bucketName (toObjectKey key)
 
-    fromObjectKey :: Store.Path -> ObjectKey -> Maybe Store.Key
-    fromObjectKey path@(Store.Path prefix) key =
-        Store.Key path <$> T.stripPrefix (prefix <> "/") (view _ObjectKey key)
+        toObjectKey :: Store.Key -> ObjectKey
+        toObjectKey (Store.Key (Store.Path prefix) k) =
+            prefix <> "/" <> k
+
+        fromObjectKey :: Store.Path -> ObjectKey -> Maybe Store.Key
+        fromObjectKey path@(Store.Path prefix) key =
+            Store.Key path <$> T.stripPrefix (prefix <> "/") key
+
+    return Store{..}
 
 
-parseS3URL :: Text -> Maybe (Region, BucketName)
+parseS3URL :: Text -> Maybe (Endpoint, BucketName)
 parseS3URL url = do
-    let (host, bucketName) = second (BucketName . T.drop 1) $ T.breakOn "/" url
-    [regionT, "amazonaws", "com"] <- return $  T.splitOn "." host
-    region <- T.stripPrefix "s3-" regionT
-                  >>= either (const Nothing) Just . parseOnly parser
-    return (region, bucketName)
+    let (host, bucketName) = second (T.drop 1) $ T.breakOn "/" url
+        endpoint = S3.s3v4 Aws.HTTPS (T.encodeUtf8 host) False S3.AlwaysUnsigned -- NB: assumes UTF8 (!)
+        --endpoint = S3.s3 Aws.HTTPS (T.encodeUtf8 host) True -- NB: assumes UTF8 (!)
+    return (endpoint { S3.s3RequestStyle = S3.PathStyle }, bucketName)
 
 
 -- NOTE: currently only used for listing small numbers of objects.
 listObjects'
-    :: Region     -- ^ Region to operate in.
+    :: (Config, Endpoint)
     -> BucketName -- ^ The bucket to query.
     -> Text       -- ^ Limit the response to keys with this prefix.
     -> IO [ObjectKey]
-listObjects' r b p = do
---    lgr <- newLogger Error stdout
-    env <- newEnv Discover <&> {-set envLogger lgr .-} set envRegion r
-    runResourceT . runAWST env . runConduit $
-        paginate (set loPrefix (Just p) $ listObjects b)
-                .| CL.concatMap (map (view oKey) . view lorsContents)
-                .| CL.consume
+listObjects' (cfg, s3cfg) b p = do
+    mgr <- newManager tlsManagerSettings
+    runResourceT $ do
+        S3.GetBucketResponse { S3.gbrContents = ois } <-
+            Aws.pureAws cfg s3cfg mgr $
+                (S3.getBucket b) { S3.gbPrefix = Just p }
+        return $ map S3.objectKey ois
   -- where
   --   toStreaming :: Source m a -> Stream (Of a) m ()
   --   toStreaming src = hoist lift src $$ CL.mapM_ S.yield
 
-
 getObject'
-    :: Region     -- ^ Region to operate in.
+    :: (Config, Endpoint)
     -> BucketName
     -> ObjectKey  -- ^ The source object key.
     -> IO LB.ByteString
-getObject' r b k = do
---    lgr <- newLogger Error stdout
-    env <- newEnv Discover <&> {-set envLogger lgr .-} set envRegion r
-    runResourceT . runAWST env $ do
-        rs <- send (getObject b k)
-        view gorsBody rs `sinkBody` CB.sinkLbs
-
+getObject' (cfg, s3cfg) b k = do
+    mgr <- newManager tlsManagerSettings
+    runResourceT $ do
+        S3.GetObjectResponse { S3.gorResponse = rsp } <-
+            Aws.pureAws cfg s3cfg mgr $
+                S3.getObject b k
+        runConduit $ responseBody rsp .| CB.sinkLbs
 
 putObject'
-    :: Region        -- ^ Region to operate in.
+    :: (Config, Endpoint)
     -> BucketName    -- ^ The bucket to store the file in.
     -> ObjectKey     -- ^ The destination object key.
     -> LB.ByteString -- ^ The bytes to upload.
     -> IO ()
-putObject' r b k bytes = do
---    lgr <- newLogger Error stdout
-    env <- newEnv Discover <&> {-set envLogger lgr .-} set envRegion r
-    runResourceT . runAWST env $
-        void . send $ putObject b k (toBody bytes)
-
+putObject' (cfg, s3cfg) b k bytes = do
+    mgr <- newManager tlsManagerSettings
+    let body = RequestBodyLBS bytes
+    runResourceT $ do
+        S3.PutObjectResponse {} <-
+            Aws.pureAws cfg s3cfg mgr $
+                S3.putObject b k body
+        return ()
 
 doesObjectExist
-    :: Region
+    :: (Config, Endpoint)
     -> BucketName
     -> ObjectKey
     -> IO Bool
-doesObjectExist r b k = do
-    env <- newEnv Discover <&> set envRegion r
-    runResourceT . runAWST env $ do
-        catch (((==200) . view horsResponseStatus) <$> send (headObject b k))
-              (\ex@(ServiceError (s :: ServiceError)) ->
-                   if view serviceStatus s == status404
-                       then return False
-                       else throwM ex)
+doesObjectExist (cfg, s3cfg) b k = do
+    mgr <- newManager tlsManagerSettings
+    runResourceT $
+        catchJust selector
+            (do { res <- Aws.pureAws cfg s3cfg mgr $ S3.headObject b k
+                ; case res of
+                      S3.HeadObjectResponse (Just{}) -> return True -- 200 OK
+                      _ -> return False })
+            (\() -> return False)
+  where
+    selector (HttpExceptionRequest _ (StatusCodeException res _))
+        | statusCode (responseStatus res) == 404 = Just () -- do we need this check?
+    selector _ = Nothing
+
+
+-- | The default configuration, with credentials loaded from
+-- environment variable or configuration file (see
+-- 'loadCredentialsDefault' below).
+baseConfiguration :: MonadIO m => m Config
+baseConfiguration = liftIO $ do
+  cr <- loadCredentialsDefault
+  case cr of
+    Nothing  -> throwM $ Aws.NoCredentialsException "Could not locate aws credentials"
+    Just cr' -> return Aws.Configuration
+                { timeInfo = Aws.Timestamp
+                , credentials = cr'
+                , logger = Aws.defaultLog Aws.Warning
+                , proxy = Nothing
+                }
+
+-- | Load credentials from environment variables if possible, or
+-- alternatively from a default file with the default key name.
+--
+-- Default file (used by awscli): /<user directory>/.aws/credentials@
+-- Default key name: @default@
+--
+-- TODO configure a credentials file and key?
+loadCredentialsDefault :: IO (Maybe Aws.Credentials)
+loadCredentialsDefault = do
+  homeDir <- getHomeDirectory
+  let file = homeDir </> ".aws" </> "credentials"
+  doesExist <- doesFileExist file
+  if doesExist
+     then Just <$> loadCredentialsFromAwsConfig file "default"
+     else Aws.loadCredentialsFromEnv
+
+-- | Load AWS credentials from awscli INI file.
+loadCredentialsFromAwsConfig :: FilePath -> Text -> IO Aws.Credentials
+loadCredentialsFromAwsConfig file profile = do
+    res <- INI.readIniFile file
+    case res >>= extract of
+        Left err ->
+            errorL $ "Could not parse aws credentials ini file: " <> T.pack err
+        Right (keyID, secret) ->
+            Aws.makeCredentials (T.encodeUtf8 keyID) (T.encodeUtf8 secret)
+  where
+    extract ini =
+        (,) <$> INI.lookupValue profile "aws_access_key_id" ini
+            <*> INI.lookupValue profile "aws_secret_access_key" ini

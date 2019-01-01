@@ -25,7 +25,7 @@ import Atavachron.Chunk.Encode
 import Atavachron.Streaming (TaskGroup)
 
 
- -- | Environment used during backup, verify and restore.
+-- | Environment used during backup, verify and restore.
 data Env = Env
   { envRepository     :: Repository       -- ^ The remote destination repository.
   , envStartTime      :: !UTCTime         -- ^ Start time of current backup.
@@ -35,6 +35,7 @@ data Env = Env
   , envCachePath      :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
   , envFilePredicate  :: !FilePredicate   -- ^ Predicate for including/excluding files to process.
   , envDirectory      :: !(Path Abs Dir)  -- ^ The local directory being backed up or restored to.
+  , envBackupBinary   :: !Bool            -- ^ If true, include an (unencrypted) backup of the program binary.
   }
 
 -- for now, just a predicate on the filepath
@@ -49,6 +50,14 @@ allFiles = FilePredicate (const $ return True)
 
 noFiles :: FilePredicate
 noFiles = FilePredicate (const $ return False)
+
+conjunction :: [FilePredicate] -> FilePredicate
+conjunction preds = FilePredicate $ \p ->
+    and <$> mapM (`applyPredicate` p) preds
+
+disjunction :: [FilePredicate] -> FilePredicate
+disjunction preds = FilePredicate $ \p ->
+    or <$> mapM (`applyPredicate` p) preds
 
 -- | Progress state used during backup.
 -- TODO better errors and warnings, e.g. show retries?

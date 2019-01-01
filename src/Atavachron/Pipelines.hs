@@ -7,7 +7,6 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
@@ -25,6 +24,7 @@ import Control.Logging
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
+import Control.Monad.Fail
 import Control.Monad.Reader.Class
 import Control.Monad.State.Class
 import Control.Monad.Trans.Class
@@ -82,20 +82,24 @@ import Atavachron.Files
 
 -- | Full and incremental backup.
 backupPipeline
-    :: (MonadReader Env m, MonadState Progress m, MonadResource m)
-    => Path Abs Dir
+    :: (MonadReader Env m, MonadState Progress m, MonadResource m, MonadFail m)
+    => Bool
+    -> Path Abs Dir
     -> m Snapshot
-backupPipeline
+backupPipeline forceFullScan
     = makeSnapshot
     . uploadPipeline
     . serialiseTree
     . overFileItems fst
           ( writeFilesCache
           . overChangedFiles (uploadPipeline . readFiles)
-          . diff fst id readFilesCache
+          . diff fst id previousFiles
           )
     . filterItems id
     . recurseDir
+  where
+    previousFiles | forceFullScan = mempty
+                  | otherwise     = readFilesCache
 
 -- | Verify files and their chunks.
 verifyPipeline
@@ -459,14 +463,19 @@ packChunkLists = groupByTag mkChunkList
         _ -> ChunkList mempty 0
 
 makeSnapshot
-    :: (MonadReader Env m, MonadIO m)
+    :: (MonadReader Env m, MonadFail m, MonadIO m)
     => Stream' (Tree, ChunkList) m r
     -> m Snapshot
 makeSnapshot str = do
     ((Tree, chunkList):_) :> _ <- S.toList str
     hostDir <- asks envDirectory
     startT  <- asks envStartTime
+    repo    <- asks envRepository
+    binary  <- asks envBackupBinary
     liftIO $ do
+        mBinaryID <- if binary
+            then storeProgramBinary repo
+            else return Nothing
         user    <- T.pack <$> User.getLoginName
         host    <- T.pack <$> getHostName
         uid     <- User.getRealUserID
@@ -481,7 +490,18 @@ makeSnapshot str = do
             , sStartTime  = startT
             , sFinishTime = finishT
             , sTree       = chunkList
+            , sExeBinary  = mBinaryID
             }
+
+storeProgramBinary :: Repository -> IO (Maybe StoreID)
+storeProgramBinary repo = do
+    e'res <- putProgramBinary repo
+    case e'res of
+        Left err -> do
+            warn' $ "Failed to store program binary: " <> T.pack (show err)
+            return Nothing
+        Right storeID ->
+            return $ Just storeID
 
 snapshotChunkLists
     :: Monad m

@@ -70,10 +70,12 @@ Note that currently keys can only be revoked by deleting them manually from the 
 
 ### Backing up to Amazon S3
 
-To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional endpoint and bucket. A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Currently the credentials must be provided in an ".s3cfg" configuration file.
+To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional endpoint and bucket:
 
     $ atavachron backup -r s3://s3-eu-west-2.amazonaws.com/<bucket-name> -d /home/tim/Pictures
 
+A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Ideally, AWS credentials should be provided in an INI-file located at `~/.aws/credentials`, currently it is only the default profile that is used. The format of this file is documented [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html). Alternatively, the environment variables
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` can be used, these are documented [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html).
 
 ## Repository structure
 
@@ -88,9 +90,38 @@ The repository structure is common to all store back-ends. At the root of the re
     ├── keys
     │   └── default
     ├── atavachron-manifest
+    ├── bin
     └── snapshots
         └── 83f992ba4df155eef874b4708799a1a03d0bd1954b25802ddeb497053a0cc745
 
+
+The bin folder optionally contains Atavachron binaries that were used to generate successful snapshots. These binaries are stored using their hash codes which are then recorded in each snapshot they create. They are not encrypted or chunked, but instead compressed using the bzip2 file format. The command-line `bzip2` tool can thus be used to recover these binaries, should there be unforeseen compatibility problems. Atavachron, like most modern software, has many third-party dependencies and so this gives us additional peace-of-mind. Note that for this to be a useful feature, Atavachron needs to be built as a statically-linked binary.
+
+## Configuration file and profiles
+
+Atavachron can make use of an optional configuration file, which as well as allowing us to tweak various runtime parameters, also allows us to save and recall one or more sets of backup parameters as "profiles". The following is an example configuration file, with a single profile:
+
+    { cachePath      = Default{} -- location of the files, chunks and repository credentials caches
+    , taskThreads    = Default{} -- number of lightweight threads used to chunk and upload/download
+    , taskBufferSize = Default{} -- number of concurrent tasks processed by the threads
+    , maxRetries     = 10        -- maximum number of retries before failure
+    , backupBinary   = True      -- backup the atavachron binary
+    , profiles =
+       [ { name = "pictures"
+         , location ="s3://s3-eu-west-2.amazonaws.com/tims-backup"
+         , source = "/tank/backups/tim/Pictures"
+         , include = []
+         , exclude = ["**/*.mp4", "**/*.VID"]
+         }
+       ]
+    }
+
+The default name and location on Linux is `~/.config/atavachron/atavachron.x`, but one can be instead specified using the `-c` switch.
+Profiles can be selected using the `-p` switch, for example:
+
+    $ atavachron backup -p pictures
+
+Any additional file globs specified on the command line will be applied in addition to those specified in the profile.
 
 ## FAQ
 

@@ -29,6 +29,7 @@ module Atavachron.Repository
     , listSnapshots
     , getSnapshot
     , putSnapshot
+    , putProgramBinary
     , initRepository
     , authenticate
     , authenticate'
@@ -38,6 +39,9 @@ module Atavachron.Repository
     ) where
 
 import Codec.Serialise
+import Codec.Serialise.Decoding
+import Codec.Serialise.Encoding
+import qualified Codec.Compression.BZip as BZip
 
 import Control.Exception
 import Control.Monad
@@ -61,6 +65,7 @@ import Streaming.Prelude (Of(..))
 import qualified Streaming.Prelude as S
 
 import System.Posix.Types
+import System.Environment (getExecutablePath)
 
 import GHC.Generics (Generic)
 
@@ -87,7 +92,9 @@ data Repository = Repository
 -- stored at "/manifest". It is encrypted using a named master key
 -- stored in "/keys" which is itself encrypted using a password.
 data Manifest = Manifest
-  { mVersion    :: !Int -- expected to be "1" currently
+  { mVersion    :: !Int -- expected to be "1" currently, we only
+                        -- intend to bump this up if we ever break
+                        -- backwards compatibility.
   , mChunkKey   :: !ChunkKey
   , mStoreIDKey :: !StoreIDKey
   , mCDCKey     :: !CDCKey
@@ -121,9 +128,37 @@ data Snapshot = Snapshot
     , sStartTime  :: !UTCTime
     , sFinishTime :: !UTCTime
     , sTree       :: !ChunkList
+    , sExeBinary  :: !(Maybe StoreID)
     } deriving (Generic, Show)
 
-instance Serialise Snapshot
+-- NOTE: Rather than create new Haskell types for every Snapshot version, we choose instead to
+-- create a custom decoder that will handle older versions. This is because we are only likely
+-- to add fields in practice and this way there are less types to deal with.
+instance Serialise Snapshot where
+   encode Snapshot{..} =
+       encodeListLen 10   <> -- 10 fields
+       encodeWord 1       <> -- Version 1, instead of 0
+       encode sUserName   <>
+       encode sHostName   <>
+       encode sHostDir    <>
+       encode sUID        <>
+       encode sGID        <>
+       encode sStartTime  <>
+       encode sFinishTime <>
+       encode sTree       <>
+       encode sExeBinary
+   decode = do
+      len <- decodeListLen
+      tag <- decodeWord
+      case (len, tag) of
+          -- version 0 could not reference the binary used for backup
+          (9,  0) -> Snapshot <$> decode <*> decode <*> decode <*>
+                                  decode <*> decode <*> decode <*>
+                                  decode <*> decode <*> pure Nothing
+          (10, 1) -> Snapshot <$> decode <*> decode <*> decode <*>
+                                  decode <*> decode <*> decode <*>
+                                  decode <*> decode <*> decode
+          _ -> fail $ "Invalid Snapshot encoding: " ++ show (len, tag)
 
 type SnapshotName = Text
 
@@ -207,6 +242,9 @@ chunksPath = Store.Path "chunks"
 keysPath :: Store.Path
 keysPath = Store.Path "keys"
 
+binariesPath :: Store.Path
+binariesPath = Store.Path "bin"
+
 manifestStoreKey :: Store.Key
 manifestStoreKey = Store.Key rootPath "atavachron-manifest"
 
@@ -286,6 +324,20 @@ putSnapshot repo snapshot = do
                >>= try . Store.put (repoStore repo) key . serialise
 
     return $ const (Store.kName key) <$> res
+
+-- | Put the program binary (Atavachron itself) in the repository and
+-- generate a key for it. We compress using the BZip2 file format and
+-- do not encrypt or chunk.
+putProgramBinary :: Repository -> IO (Either SomeException StoreID)
+putProgramBinary repo = do
+    programPath <- getExecutablePath
+    debug' $ "Storing executable " <> T.pack programPath
+    binary      <- BZip.compress <$> LB.readFile programPath
+    let Manifest{..} = repoManifest repo
+        storeID  = hashBytes mStoreIDKey (LB.toStrict binary)
+        key      = Store.Key binariesPath $ hexEncode storeID
+    res <- try (Store.put (repoStore repo) key binary)
+    return $ const storeID <$> res
 
 -- | Initialise a repository using the supplied store and password.
 initRepository :: Store -> Text -> IO CachedCredentials

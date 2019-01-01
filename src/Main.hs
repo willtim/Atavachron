@@ -1,7 +1,5 @@
 module Main where
 
-import Atavachron.Commands
-
 import Control.Logging
 import qualified Crypto.Saltine as Saltine
 
@@ -9,13 +7,16 @@ import Data.Semigroup ((<>))
 import Data.Text (Text)
 import Options.Applicative
 
-import Paths_Atavachron (version)
+import Paths_atavachron (version)
 import Data.Version (showVersion)
 
+import Atavachron.Commands
+import Atavachron.Config (URL(..))
 
 data Options = Options
-  { optCommand  :: Command
-  , optLogLevel :: LogLevel
+  { optCommand    :: Command
+  , optConfigFile :: Maybe FilePath
+  , optLogLevel   :: LogLevel
   }
 
 optionsP :: Parser Options
@@ -29,9 +30,18 @@ optionsP = Options
     <> command "list"      (info listOptionsP     ( progDesc "List files for a particular snapshot." ))
     <> command "diff"      (info diffOptionsP     ( progDesc "Diff two snapshots." ))
     <> command "keys"      (info keyOptionsP      ( progDesc "Management of password-protected access keys."))
+    <> command "config"    (info configOptionsP   ( progDesc "Validate or generate a configuration file."))
     -- <> command "help"      (info helpOptionsP    ( progDesc "Help for a particular command"))
     )
+  <*> configFileP
   <*> logLevelP
+
+configFileP :: Parser (Maybe FilePath)
+configFileP = optional $ strOption
+  (  long "config"
+  <> short 'c'
+  <> metavar "FILEPATH"
+  <> help "configuration file path" )
 
 logLevelP :: Parser LogLevel
 logLevelP = flag LevelInfo LevelDebug
@@ -39,34 +49,62 @@ logLevelP = flag LevelInfo LevelDebug
   <> help "Debug logging" )
 
 initOptionsP :: Parser Command
-initOptionsP = CInit <$> (InitOptions <$> repoUrlP)
+initOptionsP = CInit <$>
+    ((InitOptions <$> repoUrlP) <|> (InitOptionsProfile <$> profileNameP))
 
 backupOptionsP :: Parser Command
-backupOptionsP = CBackup <$> (BackupOptions <$> repoUrlP <*> sourceDirP <*> globPairP)
+backupOptionsP = CBackup <$>
+    ((BackupOptions <$> repoUrlP <*> sourceDirP <*> fileGlobsP <*> forceFullScanP) <|>
+     (BackupOptionsProfile <$> profileNameP <*> fileGlobsP <*> forceFullScanP))
 
 verifyOptionsP :: Parser Command
-verifyOptionsP = CVerify <$> (VerifyOptions <$> repoUrlP <*> snapIdP <*> globPairP)
+verifyOptionsP = CVerify <$>
+    ((VerifyOptions <$> repoUrlP <*> snapIdP <*> fileGlobsP) <|>
+     (VerifyOptionsProfile <$> profileNameP <*> snapIdP <*> fileGlobsP))
 
 restoreOptionsP :: Parser Command
-restoreOptionsP = CRestore <$> (RestoreOptions <$> repoUrlP <*> snapIdP <*> targetDirP <*> globPairP)
+restoreOptionsP = CRestore <$>
+    ((RestoreOptions <$> repoUrlP <*> snapIdP <*> targetDirP <*> fileGlobsP) <|>
+     (RestoreOptionsProfile <$> profileNameP <*> snapIdP <*> targetDirP <*> fileGlobsP))
 
 snapshotOptionsP :: Parser Command
-snapshotOptionsP = CSnapshots <$> (SnapshotOptions <$> repoUrlP)
+snapshotOptionsP = CSnapshots <$>
+    ((SnapshotOptions <$> repoUrlP <*> optional sourceDirP) <|>
+     (SnapshotOptionsProfile <$> profileNameP))
 
 listOptionsP :: Parser Command
-listOptionsP = CList <$> (ListOptions <$> repoUrlP <*> snapIdP <*> globPairP)
+listOptionsP = CList <$>
+    ((ListOptions <$> repoUrlP <*> snapIdP <*> fileGlobsP) <|>
+     (ListOptionsProfile <$> profileNameP <*> snapIdP <*> fileGlobsP))
 
 diffOptionsP :: Parser Command
-diffOptionsP = CDiff <$> (DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP)
+diffOptionsP = CDiff <$>
+    ((DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP) <|>
+     (DiffOptionsProfile <$> profileNameP <*> snapIdP <*> snapIdP))
 
 keyOptionsP :: Parser Command
-keyOptionsP = CKeys <$> (KeyOptions <$> repoUrlP <*> keysArgP)
+keyOptionsP = CKeys <$>
+    ((KeyOptions <$> repoUrlP <*> keysArgP) <|>
+     (KeyOptionsProfile <$> profileNameP <*> keysArgP))
+
+configOptionsP :: Parser Command
+configOptionsP = CConfig <$> (validateP <|> generateP)
 
 keysArgP :: Parser KeysArgument
 keysArgP = listKeysP <|> addKeyP
 
-globPairP :: Parser GlobPair
-globPairP = GlobPair <$> includeGlobP <*> excludeGlobP
+validateP :: Parser ConfigOptions
+validateP = flag' ValidateConfig
+  (  long "validate"
+  <> help "Validate configuration file" )
+
+generateP :: Parser ConfigOptions
+generateP = flag' GenerateConfig
+  (  long "generate"
+  <> help "Generate default configuration file" )
+
+fileGlobsP :: Parser FileGlobs
+fileGlobsP = FileGlobs <$> includeGlobsP <*> excludeGlobsP
 
 listKeysP :: Parser KeysArgument
 listKeysP = flag' ListKeys
@@ -98,15 +136,15 @@ snapIdP = strArgument
   (  metavar "SNAPSHOT-ID"
   <> help "Snapshot ID" )
 
-includeGlobP :: Parser (Maybe Text)
-includeGlobP = optional $ strOption
+includeGlobsP :: Parser [Text]
+includeGlobsP = many $ strOption
   (  long "include"
   <> short 'i'
   <> metavar "PATTERN"
   <> help "Only include files matching PATTERN" )
 
-excludeGlobP :: Parser (Maybe Text)
-excludeGlobP = optional $ strOption
+excludeGlobsP :: Parser [Text]
+excludeGlobsP = many $ strOption
   (  long "exclude"
   <> short 'e'
   <> metavar "PATTERN"
@@ -119,6 +157,18 @@ repoUrlP = URL <$> strOption
   <> metavar "REPO-URL"
   <> help "The repository URL" )
 
+profileNameP :: Parser Text
+profileNameP = strOption
+  (  long "profile"
+  <> short 'p'
+  <> metavar "PROFILE-NAME"
+  <> help "A profile defined in a configuration file" )
+
+forceFullScanP :: Parser Bool
+forceFullScanP = flag False True
+  (  long "force-full-scan"
+  <> help "Force reading and chunking all files, even if metadata unchanged" )
+
 main :: IO ()
 main = do
     Saltine.sodiumInit
@@ -130,4 +180,4 @@ main = do
                                     ]))
     withStdoutLogging $ do
         setLogLevel (optLogLevel options)
-        runCommand (optCommand options)
+        runCommand (optConfigFile options) (optCommand options)
