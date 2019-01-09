@@ -54,18 +54,22 @@ initOptionsP = CInit <$>
 
 backupOptionsP :: Parser Command
 backupOptionsP = CBackup <$>
-    ((BackupOptions <$> repoUrlP <*> sourceDirP <*> fileGlobsP <*> forceFullScanP) <|>
-     (BackupOptionsProfile <$> profileNameP <*> fileGlobsP <*> forceFullScanP))
+    ((BackupOptions <$> repoUrlP <*> sourceDirP <|> BackupOptionsProfile <$> profileNameP)
+    <*> fileGlobsP
+    <*> forceFullScanP)
 
 verifyOptionsP :: Parser Command
 verifyOptionsP = CVerify <$>
-    ((VerifyOptions <$> repoUrlP <*> snapIdP <*> fileGlobsP) <|>
-     (VerifyOptionsProfile <$> profileNameP <*> snapIdP <*> fileGlobsP))
+    ((VerifyOptions <$> repoUrlP <|> VerifyOptionsProfile <$> profileNameP)
+    <*> snapIdP
+    <*> fileGlobsP)
 
 restoreOptionsP :: Parser Command
 restoreOptionsP = CRestore <$>
-    ((RestoreOptions <$> repoUrlP <*> snapIdP <*> targetDirP <*> fileGlobsP) <|>
-     (RestoreOptionsProfile <$> profileNameP <*> snapIdP <*> targetDirP <*> fileGlobsP))
+    ((RestoreOptions <$> repoUrlP <|> RestoreOptionsProfile <$> profileNameP)
+    <*> snapIdP
+    <*> targetDirP
+    <*> fileGlobsP)
 
 snapshotOptionsP :: Parser Command
 snapshotOptionsP = CSnapshots <$>
@@ -74,18 +78,20 @@ snapshotOptionsP = CSnapshots <$>
 
 listOptionsP :: Parser Command
 listOptionsP = CList <$>
-    ((ListOptions <$> repoUrlP <*> snapIdP <*> fileGlobsP) <|>
-     (ListOptionsProfile <$> profileNameP <*> snapIdP <*> fileGlobsP))
+    ((ListOptions <$> repoUrlP <|> ListOptionsProfile <$> profileNameP)
+    <*> snapIdP
+    <*> fileGlobsP)
 
 diffOptionsP :: Parser Command
 diffOptionsP = CDiff <$>
-    ((DiffOptions <$> repoUrlP <*> snapIdP <*> snapIdP) <|>
-     (DiffOptionsProfile <$> profileNameP <*> snapIdP <*> snapIdP))
+    ((DiffOptions <$> repoUrlP <|> DiffOptionsProfile <$> profileNameP)
+    <*> snapIdP
+    <*> snapIdP)
 
 keyOptionsP :: Parser Command
 keyOptionsP = CKeys <$>
-    ((KeyOptions <$> repoUrlP <*> keysArgP) <|>
-     (KeyOptionsProfile <$> profileNameP <*> keysArgP))
+    ((KeyOptions <$> repoUrlP <|> KeyOptionsProfile <$> profileNameP)
+    <*> keysArgP)
 
 configOptionsP :: Parser Command
 configOptionsP = CConfig <$> (validateP <|> generateP)
