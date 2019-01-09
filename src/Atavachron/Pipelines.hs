@@ -195,7 +195,9 @@ progressMonitor = S.mapM_ $ \_ -> do
         , "Errors: "        ++ show (_prErrors)
         ]
   where
-    putProgress s = liftIO $ hPutStr stderr $ "\r\ESC[K" ++ s
+    -- NOTE: ("\ESC[K" ++ s ++ "\r") interleaves better with debug logging, although the cursor
+    -- sits at the beginning of the line.
+    putProgress s = liftIO $ hPutStr stderr $ "\ESC[K" ++ s ++ "\r"
     rate bytes ndt = round $ (toRational $ bytes `div` megabyte) / (toRational ndt) :: Int
     megabyte = 1024*1024
 
