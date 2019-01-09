@@ -3,6 +3,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
+
+{-# LANGUAGE FlexibleContexts #-}
+
 -- | An S3 Store implementation for Atavachron.
 --
 
@@ -16,11 +19,13 @@ import           Control.Logging
 import           Control.Monad.Catch
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Control.Monad.Trans
+
 import qualified Data.ByteString.Lazy    as LB
 import           Data.Conduit
 import qualified Data.Conduit.Binary     as CB
+import qualified Data.Conduit.List       as CL
 import qualified Data.Ini                as INI
-import           Data.Maybe
 import           Data.Text               (Text)
 import qualified Data.Text               as T
 import qualified Data.Text.Encoding      as T
@@ -36,7 +41,7 @@ import qualified Aws.S3 as S3
 import           System.Directory
 import           System.FilePath
 
-import           Streaming (Stream, Of(..){-, hoist-})
+import           Streaming (Stream, Of(..))
 import qualified Streaming.Prelude       as S
 
 import           Atavachron.Store (Store(..))
@@ -53,10 +58,9 @@ newS3Store name endpoint bucketName = do
     cfg <- baseConfiguration
     let params = (cfg, endpoint)
 
-        list :: Store.Path -> Stream (Of Store.Key) IO ()
-        list path@(Store.Path prefix) = do
-            keys <- liftIO $ listObjects' params bucketName prefix
-            S.each $ catMaybes $ map (fromObjectKey path) keys
+        list :: Store.Path -> Stream (Of Store.Key) (ResourceT IO) ()
+        list path@(Store.Path prefix) =
+            S.mapMaybe (fromObjectKey path) $ listObjects' params bucketName prefix
 
         get :: Store.Key -> IO LB.ByteString
         get key = getObject' params bucketName (toObjectKey key)
@@ -85,23 +89,23 @@ parseS3URL url = do
         --endpoint = S3.s3 Aws.HTTPS (T.encodeUtf8 host) True -- NB: assumes UTF8 (!)
     return (endpoint { S3.s3RequestStyle = S3.PathStyle }, bucketName)
 
-
--- NOTE: currently only used for listing small numbers of objects.
 listObjects'
     :: (Config, Endpoint)
     -> BucketName -- ^ The bucket to query.
     -> Text       -- ^ Limit the response to keys with this prefix.
-    -> IO [ObjectKey]
+    -> Stream (Of ObjectKey) (ResourceT IO) ()
 listObjects' (cfg, s3cfg) b p = do
-    mgr <- newManager tlsManagerSettings
-    runResourceT $ do
-        S3.GetBucketResponse { S3.gbrContents = ois } <-
-            Aws.pureAws cfg s3cfg mgr $
-                (S3.getBucket b) { S3.gbPrefix = Just p }
-        return $ map S3.objectKey ois
-  -- where
-  --   toStreaming :: Source m a -> Stream (Of a) m ()
-  --   toStreaming src = hoist lift src $$ CL.mapM_ S.yield
+    mgr <- liftIO $ newManager tlsManagerSettings
+    let src = Aws.awsIteratedSource cfg s3cfg mgr $
+                  (S3.getBucket b) { S3.gbPrefix = Just p }
+    S.map S3.objectKey
+      . S.concat
+      . S.mapM (fmap S3.gbrContents . Aws.readResponseIO)
+      . toStream
+      $ src
+  where
+     toStream :: Monad m => ConduitT () a m () -> Stream (Of a) m ()
+     toStream c = runConduit (transPipe lift c .| CL.mapM_ S.yield)
 
 getObject'
     :: (Config, Endpoint)

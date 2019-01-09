@@ -80,7 +80,7 @@ buffer str = do
         len' = len + B.length bs
 
 -- | Retry, if necessary, an idempotent action that is prone to
--- failure.  Exponential backoff and randomisation, ensure that we are
+-- failure.  Exponential backoff and randomisation ensure that we are
 -- a well-behaved client to a remote service.
 retryWithExponentialBackoff
     :: forall a. Int

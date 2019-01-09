@@ -6,6 +6,8 @@
 
 module Atavachron.Store where
 
+import Control.Monad.Trans.Resource
+
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy as LB
@@ -29,7 +31,7 @@ data Key = Key
 -- NOTE: get and put are restricted to objects less than 10MB.
 data Store = Store
   { name   :: Text -- typically a URL
-  , list   :: Path -> Stream' Key IO ()
+  , list   :: Path -> Stream' Key (ResourceT IO) ()
   , get    :: Key  -> IO LB.ByteString
   , put    :: Key  -> LB.ByteString -> IO ()
   , hasKey :: Key  -> IO Bool

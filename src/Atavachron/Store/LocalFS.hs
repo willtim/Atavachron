@@ -5,6 +5,7 @@
 module Atavachron.Store.LocalFS where
 
 import Control.Monad.IO.Class
+import Control.Monad.Trans.Resource
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -24,7 +25,7 @@ newLocalFS :: Text -> Path Abs Dir -> Store
 newLocalFS name root = Store{..}
   where
 
-    list :: Store.Path -> Stream' Store.Key IO ()
+    list :: Store.Path -> Stream' Store.Key (ResourceT IO) ()
     list path@(Store.Path p) = do
         liftIO $ ensureSubdir path
         dirName <- liftIO $ (</> T.unpack p) <$> getFilePath root

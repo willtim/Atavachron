@@ -44,8 +44,10 @@ import Codec.Serialise.Encoding
 import qualified Codec.Compression.BZip as BZip
 
 import Control.Exception
-import Control.Monad
 import Control.Logging
+import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Resource
 
 import qualified Crypto.Scrypt as Scrypt
 import qualified Crypto.Saltine.Class as Saltine
@@ -284,18 +286,22 @@ mkChunkKey storeID = Store.Key path name
     name = hexEncode storeID
     path = Store.Path $ Store.unPath chunksPath <> "/" <> T.take 2 name
 
-listSnapshots :: Repository -> Stream' (SnapshotName, Either SomeException Snapshot) IO ()
+listSnapshots
+    :: Repository
+    -> Stream' (SnapshotName, Either SomeException Snapshot) (ResourceT IO) ()
 listSnapshots repo = do
     let store  = repoStore repo
         keyStr = Store.list store snapshotsPath
-    S.zip (S.map Store.kName keyStr) $ S.mapM (getSnapshotByKey repo) keyStr
+    S.zip (S.map Store.kName keyStr)
+        $ S.mapM (liftIO . getSnapshotByKey repo) keyStr
 
 -- | Retrieve a snapshot by a potentially partial key.
 getSnapshot :: Repository -> SnapshotName -> IO (Either SomeException Snapshot)
 getSnapshot repo partialKey = do
     -- for now we will just list all the snapshots and search them
-    keys :> ()  <- S.toList
-                 $ S.filter match
+    keys :> ()  <- runResourceT
+                 . S.toList
+                 . S.filter match
                  $ Store.list (repoStore repo) snapshotsPath
     case keys of
         [k] -> getSnapshotByKey repo k
@@ -377,13 +383,14 @@ authenticate store pass = do
     -- for now, just try each key in succession
     let keyStr = listAccessKeys store
     (manifestKey, cc) <- fromMaybe (errorL' "Password does not match any stored!")
-               <$> S.foldM_ tryPass (return Nothing) return keyStr
+               <$> runResourceT (S.foldM_ tryPass (return Nothing) return keyStr)
     (,cc) <$> resolveRepository store manifestKey
 
   where
-    tryPass :: Maybe (ManifestKey, CachedCredentials)
-            -> (AccessKeyName, Either SomeException AccessKey)
-            -> IO (Maybe (ManifestKey, CachedCredentials))
+    tryPass
+        :: Maybe (ManifestKey, CachedCredentials)
+        -> (AccessKeyName, Either SomeException AccessKey)
+        -> (ResourceT IO) (Maybe (ManifestKey, CachedCredentials))
     tryPass Nothing (name, Left ex) = do
         warn' $ "Could not retrieve key '" <> name <> "' : " <> T.pack (show ex)
         return Nothing
@@ -435,10 +442,13 @@ keyFromPassword salt pass = key
 
 
 -- | List the available access keys for accessing the repository.
-listAccessKeys :: Store -> Stream' (AccessKeyName, Either SomeException AccessKey) IO ()
+listAccessKeys
+    :: Store
+    -> Stream' (AccessKeyName, Either SomeException AccessKey) (ResourceT IO) ()
 listAccessKeys store = do
     let keyStr = S.map Store.kName $ Store.list store keysPath
-    S.zip keyStr $ S.mapM (getAccessKey store) keyStr
+    S.zip keyStr
+        $ S.mapM (liftIO . getAccessKey store) keyStr
 
 -- | Retrieve an AccessKey using the provided name.
 getAccessKey :: Store -> AccessKeyName -> IO (Either SomeException AccessKey)

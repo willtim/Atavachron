@@ -26,6 +26,7 @@ import Codec.Serialise
 import Control.Exception
 import Control.Logging
 import Control.Monad
+import Control.Monad.IO.Class
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Resource
@@ -53,10 +54,11 @@ import Atavachron.Config
 import Atavachron.Env
 import Atavachron.Path
 import Atavachron.Pipelines
-import Atavachron.Repository (Repository(..), Snapshot(..), SnapshotName, CachedCredentials)
+import Atavachron.Repository ( Repository(..), Snapshot(..)
+                             , SnapshotName, CachedCredentials)
 import Atavachron.Store (Store)
 import Atavachron.Streaming (mkTaskGroup)
-import Atavachron.Tree (FileMeta(..), Diff(..))
+import Atavachron.Tree (FileMeta(..), Diff(..), filterItems)
 import qualified Atavachron.Repository as Repository
 import qualified Atavachron.Store as Store
 import qualified Atavachron.Store.LocalFS as Store
@@ -208,7 +210,7 @@ initialise InitOptions{..} _ = do
     cc    <- Repository.initRepository store pass
     let url = urlText repoURL
     saveCredentials url cc
-    T.putStrLn $ "Repository created at " <> url
+    log' $ "Repository created at " <> url
 initialise InitOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     initialise (InitOptions{repoURL = profileLocation p}) mcfg
@@ -219,7 +221,7 @@ backup BackupOptions{..} mcfg = do
     store     <- parseURL'    repoURL
     repo      <- authenticate store
     runBackup mcfg repo sourceDir fileGlobs forceFullScan
-    T.putStrLn $ "Backup complete."
+    log' "Backup complete."
 backup BackupOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     backup (BackupOptions{repoURL = profileLocation p
@@ -234,7 +236,7 @@ verify VerifyOptions{..} mcfg = do
     repo      <- authenticate store
     snap      <- getSnapshot  repo snapshotID
     runVerify mcfg repo snap fileGlobs
-    T.putStrLn $ "Verification complete."
+    log' "Verification complete."
 verify VerifyOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     verify (VerifyOptions{repoURL = profileLocation p
@@ -249,7 +251,7 @@ restore RestoreOptions{..} mcfg = do
     repo      <- authenticate store
     snap      <- getSnapshot  repo snapshotID
     runRestore mcfg repo snap targetDir fileGlobs
-    T.putStrLn $ "Restore complete."
+    log' "Restore complete."
 restore RestoreOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     restore (RestoreOptions{repoURL = profileLocation p
@@ -325,20 +327,21 @@ listSnapshots repoURL sourceDir = do
     repo      <- authenticate store
     let stream = S.filter snapshotsFilter
                $ Repository.listSnapshots repo
-    flip S.mapM_ stream $ \(key, e'snap) ->
-        case e'snap of
-            Left ex            ->
-                errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)
-            Right Snapshot{..} -> do
-                hostDir <- getFilePath sHostDir
-                printf "%s | %-8.8s | %-8.8s | %-32.32s | %-16.16s | %-16.16s | %s \n"
-                       (T.unpack $ T.take 8 key)
-                       (T.unpack sUserName)
-                       (T.unpack sHostName)
-                       hostDir
-                       (show sStartTime)
-                       (show sFinishTime)
-                       (maybe "" (T.unpack . T.take 8 . hexEncode) sExeBinary)
+    runResourceT $
+        flip S.mapM_ stream $ \(key, e'snap) ->
+            case e'snap of
+                Left ex            ->
+                    errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)
+                Right Snapshot{..} -> liftIO $ do
+                    hostDir <- getFilePath sHostDir
+                    printf "%s | %-8.8s | %-8.8s | %-32.32s | %-16.16s | %-16.16s | %s \n"
+                           (T.unpack $ T.take 8 key)
+                           (T.unpack sUserName)
+                           (T.unpack sHostName)
+                           hostDir
+                           (show sStartTime)
+                           (show sFinishTime)
+                           (maybe "" (T.unpack . T.take 8 . hexEncode) sExeBinary)
   where
     -- TODO we should offer the ability to filter by more than just sourceDir,
     -- for example: hostname and username
@@ -369,7 +372,9 @@ listAccessKeys :: URL -> IO ()
 listAccessKeys repoURL = do
     store <- parseURL'    repoURL
     repo  <- authenticate store
-    S.mapM_ (T.putStrLn . fst) $ Repository.listAccessKeys (repoStore repo)
+    runResourceT
+        . S.mapM_ (liftIO . T.putStrLn . fst)
+        $ Repository.listAccessKeys (repoStore repo)
 
 addAccessKey :: URL -> Text -> IO ()
 addAccessKey repoURL name = do
@@ -394,7 +399,7 @@ runBackup mcfg repo sourceDir globs forceFullScan = do
     case res of
         Left ex   -> errorL' $ "Failed to write snapshot: " <> T.pack (show ex)
         Right key -> do
-            T.hPutStrLn IO.stderr $ "\nWrote snapshot " <> T.take 8 key
+            log' $ "Wrote snapshot " <> T.take 8 key
             runReaderT commitFilesCache env
 
 runVerify :: Maybe Config -> Repository -> Snapshot -> FileGlobs -> IO ()
