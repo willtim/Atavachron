@@ -107,6 +107,10 @@ isAbsolute AbsDir{}         = True
 isAbsolute RelDir{}         = False
 isAbsolute (FilePath dir _) = isAbsolute dir
 
+isPrefixOf :: Path Abs Dir -> Path Abs Dir -> Bool
+isPrefixOf (AbsDir ns1) (AbsDir ns2) =
+    List.isPrefixOf (toList ns1) (toList ns2)
+
 getRawFilePath :: Path b t -> RawFilePath
 getRawFilePath p = B.concat . prefix . List.intersperse "/" $ go p
   where

@@ -116,10 +116,14 @@ saveFiles str = do
             Right other -> do
                 maybe (return ()) closeFile open
                 case other of
-                    DirItem FileMeta{..} ->
-                        liftIO $ Dir.createDirectory (getRawFilePath filePath) fileMode
-                    LinkItem FileMeta{..} target ->
-                        liftIO $ Files.createSymbolicLink target (getRawFilePath filePath)
+                    DirItem FileMeta{..} -> liftIO $ do
+                        Dir.createDirectory (getRawFilePath filePath) fileMode
+                        fp <- getFilePath filePath
+                        debug' $ "Wrote directory '" <> T.pack fp <> "'"
+                    LinkItem FileMeta{..} target -> liftIO $ do
+                        Files.createSymbolicLink target (getRawFilePath filePath)
+                        fp <- getFilePath filePath
+                        debug' $ "Wrote symbolic link '" <> T.pack fp <> "'"
                 return Nothing
 
     doFileChunk file bs = \case

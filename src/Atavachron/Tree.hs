@@ -32,6 +32,7 @@ import Data.Int
 import Data.Maybe
 import qualified Data.List as List
 import Data.Ord (comparing)
+import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Time (NominalDiffTime)
 
@@ -355,7 +356,7 @@ deserialiseTree str = do
 
 
 -- | An optimisation for small files, whereby we avoid repeated instances of
--- the same storeID, but writing out an empty list.
+-- the same storeID, by writing out an empty list.
 compressLists
     :: Monad m
     => Stream' (t, ChunkList) m r
@@ -384,3 +385,65 @@ uncompressLists = flip S.mapAccum_ Nothing $ \prevChunk (t, currCL) ->
                       (Seq.viewr -> _ Seq.:> storeID) -> Just storeID
                       _ -> Nothing
     in (prevChunk', (t, currCL'))
+
+
+-- | Apply the FilePredicate to the supplied tree metadata and
+-- filter out files/directories for backup or restore.
+--
+-- NOTE: The complication here is that we want to ensure that any
+-- parent directories are restored, if they are needed by matching globs
+-- of any child file or directory items.
+filterItems
+    :: forall m e r. (MonadReader Env m, MonadIO m)
+    => (e -> FileItem)
+    -> Stream' (Either e OtherItem) m r
+    -> Stream' (Either e OtherItem) m r
+filterItems extract str = do
+    p         <- asks envFilePredicate
+    targetDir <- asks envDirectory
+
+    let apply :: FileMeta (Path Abs t) -> IO Bool
+        apply item = applyPredicate p (relativise targetDir $ filePath item)
+
+    let loop
+            :: Stream' (Either e OtherItem) m r
+            -> Seq (FileMeta (Path Abs Dir))
+            -> Stream' (Either e OtherItem) m r
+        loop !str !dirs = do
+            res <- lift $ S.next str
+            case res of
+                Left r -> return r
+                Right (x, str') -> step x str' dirs
+
+        step
+            :: Either e OtherItem
+            -> Stream' (Either e OtherItem) m r
+            -> Seq (FileMeta (Path Abs Dir))
+            -> Stream' (Either e OtherItem) m r
+        step x@(Left (extract -> item))  str' dirs = do
+            keep <- liftIO $ apply item
+            if keep
+                then yieldWithDirs dirs x >> loop str' mempty
+                else loop str' dirs
+        step x@(Right (LinkItem item _)) str' dirs = do
+            keep <- liftIO $ apply item
+            when keep $ S.yield x
+            loop str' dirs
+        step x@(Right (DirItem item))    str' dirs = do
+            keep <- liftIO $ apply item
+            if keep
+                then yieldWithDirs dirs x >> loop str' mempty
+                else loop str' (pushDir item dirs)
+
+    loop str mempty
+
+  where
+
+    yieldWithDirs dirs x =
+        S.each (fmap (Right . DirItem) dirs) >> S.yield x
+
+    isPrefixOf' item1 item2 =
+        isPrefixOf (filePath item1) (filePath item2)
+
+    pushDir item dirs =
+        Seq.filter (`isPrefixOf'` item) dirs Seq.|> item

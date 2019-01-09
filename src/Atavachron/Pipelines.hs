@@ -211,25 +211,6 @@ overFileItems getFileItem f =
     otherElems (DirItem item)    = pathElems (filePath item)
     otherElems (LinkItem item _) = pathElems (filePath item)
 
--- | Apply the FilePredicate to the supplied tree metadata and
--- filter out files/directories for backup or restore.
-filterItems
-    :: (MonadReader Env m, MonadIO m)
-    => (e -> FileItem)
-    -> Stream' (Either e OtherItem) m r
-    -> Stream' (Either e OtherItem) m r
-filterItems extract str = do
-    p         <- asks envFilePredicate
-    targetDir <- asks envDirectory
-
-    let apply :: FileMeta (Path Abs t) -> IO Bool
-        apply item = applyPredicate p (relativise targetDir $ filePath item)
-
-    flip S.filterM str $ liftIO . \case
-        Left (extract -> item)  -> apply item
-        Right (LinkItem item _) -> apply item
-        Right (DirItem item)    -> apply item
-
 -- | Report errors during restore and log affected files.
 -- Perhaps in the future we can record broken files and missing chunks
 -- then we can give them special names in saveFiles? For now, just abort.
