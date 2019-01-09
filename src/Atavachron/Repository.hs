@@ -313,6 +313,7 @@ getSnapshot repo partialKey = do
 -- | Retrieve a snapshot by its fully-specified key.
 getSnapshotByKey :: Repository -> Key -> IO (Either SomeException Snapshot)
 getSnapshotByKey repo key = do
+    debug' $ "Loading snapshot with key: " <> Store.kName key
     let Manifest{..} = repoManifest repo
     e'blob <- try (Store.get (repoStore repo) key)
     return $ e'blob >>= decrypt (unChunkKey mChunkKey)
@@ -325,6 +326,8 @@ putSnapshot repo snapshot = do
         pickled  = LB.toStrict $ serialise snapshot
         storeID  = hashBytes mStoreIDKey pickled
         key      = Store.Key snapshotsPath $ hexEncode storeID
+
+    debug' $ "Writing snapshot with key: " <> Store.kName key
 
     res <- encryptBytes (unChunkKey mChunkKey) pickled
                >>= try . Store.put (repoStore repo) key . serialise
@@ -342,6 +345,8 @@ putProgramBinary repo = do
     let Manifest{..} = repoManifest repo
         storeID  = hashBytes mStoreIDKey (LB.toStrict binary)
         key      = Store.Key binariesPath $ hexEncode storeID
+
+    debug' $ "Writing Atavachron binary with key: " <> Store.kName key
     res <- try (Store.put (repoStore repo) key binary)
     return $ const storeID <$> res
 
