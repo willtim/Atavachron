@@ -181,19 +181,24 @@ progressMonitor
     :: (MonadState Progress m, MonadReader Env m, MonadIO m)
     => Stream' a m r
     -> m r
-progressMonitor = S.mapM_ $ \_ -> do
-    Progress{..} <- get
-    startT       <- asks envStartTime
-    nowT         <- liftIO getCurrentTime
-    putProgress $ unwords $ List.intersperse " | "
-        [ "Files: "         ++ show _prFiles
-        , "Chunks: "        ++ show _prChunks
-        , "In: "            ++ show (_prInputSize  `div` megabyte) ++ " MB"
-        , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
-        , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
-        , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
-        , "Errors: "        ++ show (_prErrors)
-        ]
+progressMonitor str = do
+    let monitor = S.mapM_ $ \_ -> do
+            Progress{..} <- get
+            startT       <- asks envStartTime
+            nowT         <- liftIO getCurrentTime
+            putProgress $ unwords $ List.intersperse " | "
+                [ "Files: "         ++ show _prFiles
+                , "Chunks: "        ++ show _prChunks
+                , "In: "            ++ show (_prInputSize  `div` megabyte) ++ " MB"
+                , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
+                , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
+                , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
+                , "Errors: "        ++ show (_prErrors)
+                ]
+    r <- monitor str
+    -- print a newline to always leave the last progress line visible at the end
+    liftIO $ hPutStrLn stderr ""
+    return r
   where
     -- NOTE: ("\ESC[K" ++ s ++ "\r") interleaves better with debug logging, although the cursor
     -- sits at the beginning of the line.
