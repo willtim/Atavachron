@@ -403,7 +403,7 @@ runBackup mcfg repo sourceDir globs forceFullScan = do
         Left ex   -> errorL' $ "Failed to write snapshot: " <> T.pack (show ex)
         Right key -> do
             log' $ "Wrote snapshot " <> T.take 8 key
-            runReaderT commitFilesCache env
+            runReaderT (commitFilesCache >> cleanUpTempFiles) env
 
 runVerify :: Maybe Config -> Repository -> Snapshot -> FileGlobs -> IO ()
 runVerify mcfg repo snapshot globs = do

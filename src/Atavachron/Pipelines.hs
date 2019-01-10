@@ -435,6 +435,10 @@ resolveTempFileName'
 resolveTempFileName' name =
     resolveTempFileName name >>= liftIO . getFilePath
 
+cleanUpTempFiles :: (MonadReader Env m, MonadIO m) => m ()
+cleanUpTempFiles = ask >>= \Env{..} -> liftIO $ do
+    Dir.removeDirectoryRecursive =<< getFilePath envTempPath
+
 resolveCacheFileName
     :: (MonadReader Env m, MonadIO m)
     => RawName
