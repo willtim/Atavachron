@@ -37,7 +37,7 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LB
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as E
+import qualified Data.Text.Encoding as T
 import Data.Time.Clock
 
 import qualified Data.List as List
@@ -386,7 +386,7 @@ writeFilesCache
   => Stream' (FileItem, ChunkList) m r
   -> Stream' (FileItem, ChunkList) m r
 writeFilesCache str = do
-    cacheFile <- getFilesCacheName "files.tmp" >>= resolveCacheFileName
+    cacheFile <- resolveTempFileName "files.tmp"
     sourceDir <- asks envDirectory
     writeCacheFile cacheFile
         . relativePaths sourceDir
@@ -397,14 +397,15 @@ readFilesCache
   :: (MonadReader Env m, MonadResource m)
   => Stream' (FileItem, ChunkList) m ()
 readFilesCache = do
-    cacheFile <- getFilesCacheName "files" >>= resolveCacheFileName
+    cacheFile <- genFilesCacheName "files" >>= resolveCacheFileName
     sourceDir <- asks envDirectory
     S.map (ceFileItem &&& ceChunkList)
         . absolutePaths sourceDir
         $ readCacheFile cacheFile
 
-getFilesCacheName :: MonadReader Env m => RawName -> m RawName
-getFilesCacheName prefix = do
+-- Generate a file cache file name from the absolute path of the source directory.
+genFilesCacheName :: MonadReader Env m => RawName -> m RawName
+genFilesCacheName prefix = do
     name  <- Builder.toLazyByteString . Builder.byteStringHex . getRawFilePath
                  <$> asks envDirectory
     return $ prefix <> "." <> LB.toStrict name
@@ -412,12 +413,27 @@ getFilesCacheName prefix = do
 -- NOTE: We only commit updates to the file cache if the entire backup completes.
 commitFilesCache :: (MonadIO m, MonadCatch m, MonadReader Env m) => m ()
 commitFilesCache = do
-    cacheFile  <- getFilesCacheName "files.tmp" >>= resolveCacheFileName'
-    cacheFile' <- getFilesCacheName "files"     >>= resolveCacheFileName'
+    cacheFile  <- resolveTempFileName' "files.tmp"
+    cacheFile' <- genFilesCacheName "files" >>= resolveCacheFileName'
     res <- try $ liftIO $ Dir.renameFile cacheFile cacheFile'
     case res of
         Left (ex :: SomeException) -> errorL' $ "Failed to update cache file: " <> (T.pack $ show ex)
         Right () -> return ()
+
+resolveTempFileName
+    :: (MonadReader Env m, MonadIO m)
+    => RawName
+    -> m (Path Abs File)
+resolveTempFileName name = ask >>= \Env{..} -> liftIO $ do
+    Dir.createDirectoryIfMissing True =<< getFilePath envTempPath
+    return $ makeFilePath envTempPath name
+
+resolveTempFileName'
+    :: (MonadReader Env m, MonadIO m)
+    => RawName
+    -> m FilePath
+resolveTempFileName' name =
+    resolveTempFileName name >>= liftIO . getFilePath
 
 resolveCacheFileName
     :: (MonadReader Env m, MonadIO m)
@@ -430,11 +446,12 @@ resolveCacheFileName'
     :: (MonadReader Env m, MonadIO m)
     => RawName
     -> m FilePath
-resolveCacheFileName' name = resolveCacheFileName name >>= liftIO . getFilePath
+resolveCacheFileName' name =
+    resolveCacheFileName name >>= liftIO . getFilePath
 
 mkCacheFileName :: Path Abs Dir -> Text -> RawName -> IO (Path Abs File)
 mkCacheFileName cachePath repoURL name = do
-    let dir = pushDir cachePath (E.encodeUtf8 $ URI.encodeText repoURL)
+    let dir = pushDir cachePath (T.encodeUtf8 $ URI.encodeText repoURL)
     Dir.createDirectoryIfMissing True =<< getFilePath dir
     return $ makeFilePath dir name
 

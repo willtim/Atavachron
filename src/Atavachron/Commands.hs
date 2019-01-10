@@ -36,6 +36,7 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Data.Text.Encoding as T
 import Data.Time.Clock
 
 import qualified System.IO as IO
@@ -46,6 +47,8 @@ import Text.Printf
 
 import Streaming.Prelude as S (filter)
 import System.FilePath.Glob
+import System.Posix.Process (getProcessID)
+
 import qualified System.Directory as Dir
 import qualified System.Posix.Files as Files
 
@@ -471,6 +474,9 @@ makeEnv mcfg repo localDir globs = do
 
     cachePath   <- maybe getCachePath parseAbsDir'
                  $ getOverride configCachePath
+
+    tempPath    <- getTempDir
+
     return Env
          { envRepository     = repo
          , envStartTime      = startT
@@ -478,6 +484,7 @@ makeEnv mcfg repo localDir globs = do
          , envTaskGroup      = taskGroup
          , envRetries        = maybe 5 fromIntegral $ configMaxRetries <$> mcfg
          , envCachePath      = cachePath
+         , envTempPath       = tempPath
          , envFilePredicate  = parseGlobs globs
          , envDirectory      = localDir
          , envBackupBinary   = fromMaybe False $ configBackupBinary <$> mcfg
@@ -498,6 +505,20 @@ parseAbsDir' t =
     case parseAbsDir (T.unpack t) of
         Nothing   -> errorL' $ "Cannot parse absolute path: " <> t
         Just path -> return path
+
+-- | Return a temporary directory inside the appropriate place which
+-- incorporates the process name.
+getTempDir :: IO (Path Abs Dir)
+getTempDir = do
+    fp  <- Dir.getTemporaryDirectory
+    case parseAbsDir fp of
+        Nothing   -> errorL' $ "Cannot parse system-provided temporary path: " <> (T.pack fp)
+        Just path -> do
+            pid <- T.encodeUtf8 . T.pack . show <$> getProcessID
+            let tmpDir = foldl pushDir path [T.encodeUtf8 "atavachron", pid]
+            fp  <- getFilePath tmpDir
+            debug' $ "Using temporary directory: " <> T.pack fp
+            return tmpDir
 
 -- | Logs and throws, if it cannot retrieve the snapshot
 getSnapshot :: Repository -> Text -> IO Snapshot

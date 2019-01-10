@@ -33,6 +33,7 @@ data Env = Env
   , envTaskBufferSize :: !Int             -- ^ Size of readahead for the stream, used for parallel processing.
   , envTaskGroup      :: !TaskGroup       -- ^ Sized with the number of processing cores.
   , envCachePath      :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
+  , envTempPath       :: !(Path Abs Dir)  -- ^ A temporary directory for this process to use.
   , envFilePredicate  :: !FilePredicate   -- ^ Predicate for including/excluding files to process.
   , envDirectory      :: !(Path Abs Dir)  -- ^ The local directory being backed up or restored to.
   , envBackupBinary   :: !Bool            -- ^ If true, include an (unencrypted) backup of the program binary.
