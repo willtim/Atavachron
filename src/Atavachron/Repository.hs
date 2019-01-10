@@ -170,7 +170,7 @@ data ChunkList = ChunkList
     { clChunks :: !(Seq StoreID)
     , clOffset :: !Offset -- offset in first chunk
     }
-  deriving (Generic, Eq, Show, Read)
+  deriving (Generic, Eq, Show)
 
 instance Serialise ChunkList
 

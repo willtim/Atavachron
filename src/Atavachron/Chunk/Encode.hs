@@ -44,9 +44,12 @@ import GHC.Generics (Generic)
 type Offset = Int
 
 newtype StoreID = StoreID { unStoreID :: B.ByteString }
-    deriving (Generic, Eq, Show, Read)
+    deriving (Generic, Eq)
 
 instance Serialise StoreID
+
+instance Show StoreID where
+    show = T.unpack . hexEncode
 
 newtype ChunkKey = ChunkKey { unChunkKey :: SecretBox.Key }
 
