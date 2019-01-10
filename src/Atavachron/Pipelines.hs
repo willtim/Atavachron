@@ -277,7 +277,7 @@ dedupChunks
   => Stream' (PlainChunk t) m r
   -> Stream' (Either (PlainChunk t) (TaggedOffsets t, StoreID)) m r
 dedupChunks str = do
-    cacheFile   <- T.pack <$> resolveCacheFileName' "chunks"
+    cacheFile   <- T.pack <$> resolveTempFileName' "chunks"
     (key, conn) <- allocate (ChunkCache.connect cacheFile) ChunkCache.close
     r <- flip S.mapM str $ \c@Chunk{..} -> do
         -- collect some statistics
