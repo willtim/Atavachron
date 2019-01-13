@@ -59,8 +59,8 @@ newS3Store name endpoint bucketName = do
     let params = (cfg, endpoint)
 
         list :: Store.Path -> Stream (Of Store.Key) (ResourceT IO) ()
-        list path@(Store.Path prefix) =
-            S.mapMaybe (fromObjectKey path) $ listObjects' params bucketName prefix
+        list (Store.Path prefix) =
+            S.map fromObjectKey $ listObjects' params bucketName prefix
 
         get :: Store.Key -> IO LB.ByteString
         get key = getObject' params bucketName (toObjectKey key)
@@ -75,9 +75,10 @@ newS3Store name endpoint bucketName = do
         toObjectKey (Store.Key (Store.Path prefix) k) =
             prefix <> "/" <> k
 
-        fromObjectKey :: Store.Path -> ObjectKey -> Maybe Store.Key
-        fromObjectKey path@(Store.Path prefix) key =
-            Store.Key path <$> T.stripPrefix (prefix <> "/") key
+        fromObjectKey :: ObjectKey -> Store.Key
+        fromObjectKey key =
+            let (path, key') = first (T.dropEnd 1) $ T.breakOnEnd "/" key
+            in Store.Key (Store.Path path) key'
 
     return Store{..}
 

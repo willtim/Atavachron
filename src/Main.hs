@@ -30,8 +30,9 @@ optionsP = Options
     <> command "list"      (info listOptionsP     ( progDesc "List files for a particular snapshot." ))
     <> command "diff"      (info diffOptionsP     ( progDesc "Diff two snapshots." ))
     <> command "keys"      (info keyOptionsP      ( progDesc "Management of password-protected access keys."))
+    <> command "chunks"    (info chunkOptionsP    ( progDesc "Chunk management and statistics."))
     <> command "config"    (info configOptionsP   ( progDesc "Validate or generate a configuration file."))
-    -- <> command "help"      (info helpOptionsP    ( progDesc "Help for a particular command"))
+    -- <> command "help"      (info helpOptionsP    ( progDesc "Help for a particular command."))
     )
   <*> configFileP
   <*> logLevelP
@@ -93,11 +94,19 @@ keyOptionsP = CKeys <$>
     ((KeyOptions <$> repoUrlP <|> KeyOptionsProfile <$> profileNameP)
     <*> keysArgP)
 
+chunkOptionsP :: Parser Command
+chunkOptionsP = CChunks <$>
+    ((ChunkOptions <$> repoUrlP <|> ChunkOptionsProfile <$> profileNameP)
+    <*> chunksArgP)
+
 configOptionsP :: Parser Command
 configOptionsP = CConfig <$> (validateP <|> generateP)
 
 keysArgP :: Parser KeysArgument
 keysArgP = listKeysP <|> addKeyP
+
+chunksArgP :: Parser ChunksArgument
+chunksArgP = checkChunksP
 
 validateP :: Parser ConfigOptions
 validateP = flag' ValidateConfig
@@ -122,6 +131,11 @@ addKeyP = AddKey <$> strOption
   (  long "add"
   <> metavar "NAME"
   <> help "Add access key" )
+
+checkChunksP :: Parser ChunksArgument
+checkChunksP = flag' CheckChunks
+  (  long "check"
+  <> help "check for garbage or missing chunks" )
 
 sourceDirP :: Parser Text
 sourceDirP = strOption

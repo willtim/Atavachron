@@ -21,9 +21,9 @@ import Control.Monad.IO.Class
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Lazy.Char8 as L8
-import qualified Data.ByteString.Builder as Builder
+import qualified Data.ByteString.Base16 as Base16
 
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
@@ -102,7 +102,11 @@ newStoreIDKey = StoreIDKey <$> Auth.newKey
 
 -- | Encode a StoreID as a hexadecimal text string.
 hexEncode :: StoreID -> Text
-hexEncode = T.pack . L8.unpack . Builder.toLazyByteString . Builder.byteStringHex . unStoreID
+hexEncode = T.decodeUtf8 . Base16.encode . unStoreID
+
+-- | Decode a hexadecimal text string into a StoreID.
+hexDecode :: Text -> StoreID
+hexDecode = StoreID . fst . Base16.decode . T.encodeUtf8
 
 -- | Calculate the storage IDs using a Hash message authentication code.
 hashChunk :: StoreIDKey -> RawChunk (TaggedOffsets t) B.ByteString -> PlainChunk t

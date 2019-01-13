@@ -45,7 +45,7 @@ import GHC.Conc (numCapabilities)
 
 import Text.Printf
 
-import Streaming.Prelude as S (filter)
+import qualified Streaming.Prelude as S (filter)
 import System.FilePath.Glob
 import System.Posix.Process (getProcessID)
 
@@ -81,6 +81,7 @@ data Command
   | CList      ListOptions
   | CDiff      DiffOptions
   | CKeys      KeyOptions
+  | CChunks    ChunkOptions
   | CConfig    ConfigOptions
 --  | Help
 
@@ -174,9 +175,22 @@ data KeyOptions
       , argument    :: KeysArgument
       }
 
+data ChunkOptions
+    = ChunkOptions
+      { repoURL     :: URL
+      , argument    :: ChunksArgument
+      }
+    | ChunkOptionsProfile
+      { profileName :: Text
+      , argument    :: ChunksArgument
+      }
+
 data KeysArgument
     = ListKeys
     | AddKey Text
+
+data ChunksArgument
+    = CheckChunks
 
 data ConfigOptions
     = ValidateConfig
@@ -202,6 +216,7 @@ runCommand mfp cmd = do
         CList options       -> mcfg >>= list options
         CDiff options       -> mcfg >>= diff options
         CKeys options       -> mcfg >>= keys options
+        CChunks options     -> mcfg >>= chunks options
         CConfig options     -> config options mfp
 
 ------------------------------------------------------------
@@ -316,6 +331,16 @@ keys KeyOptionsProfile{..} mcfg = do
                     ,argument
                     }) mcfg
 
+chunks :: ChunkOptions -> Maybe Config -> IO ()
+chunks ChunkOptions{..} mcfg =
+    case argument of
+        CheckChunks -> runCheckChunks mcfg repoURL
+chunks ChunkOptionsProfile{..} mcfg = do
+    p <- getProfile profileName mcfg
+    chunks (ChunkOptions{repoURL = profileLocation p
+                        ,argument
+                        }) mcfg
+
 config :: ConfigOptions -> Maybe FilePath -> IO ()
 config GenerateConfig mfp = writeDefaultConfigFile mfp
 config ValidateConfig mfp = do
@@ -392,6 +417,8 @@ addAccessKey repoURL name = do
 runBackup :: Maybe Config -> Repository -> Path Abs Dir -> FileGlobs -> Bool -> IO ()
 runBackup mcfg repo sourceDir globs forceFullScan = do
     env      <- makeEnv mcfg repo sourceDir globs
+    -- TODO read last snapshot written and check that it still exists, if it doesn't
+    -- force a full scan.
     snapshot <-
         runResourceT
           . flip evalStateT initialProgress
@@ -402,6 +429,8 @@ runBackup mcfg repo sourceDir globs forceFullScan = do
     case res of
         Left ex   -> errorL' $ "Failed to write snapshot: " <> T.pack (show ex)
         Right key -> do
+            -- print a newline to always leave the last stderr progress line visible at the end
+            liftIO $ IO.hPutStr IO.stderr "\n"
             log' $ "Wrote snapshot " <> T.take 8 key
             runReaderT (commitFilesCache >> cleanUpTempFiles) env
 
@@ -426,6 +455,16 @@ runRestore mcfg repo snapshot targetDir globs = do
         . flip evalStateT initialProgress
         . flip runReaderT env
         $ restoreFiles snapshot
+
+runCheckChunks :: Maybe Config -> URL -> IO ()
+runCheckChunks mcfg repoURL = do
+    store <- parseURL'    repoURL
+    repo  <- authenticate store
+    env   <- makeEnv mcfg repo rootDir noFileGlobs
+    runResourceT
+        . flip evalStateT initialProgress
+        . flip runReaderT env
+        $ chunkCheck repo >> cleanUpTempFiles
 
 authenticate :: Store -> IO Repository
 authenticate store = do

@@ -24,10 +24,10 @@ import Control.Logging
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
+import Control.Monad.Morph
 import Control.Monad.Fail
 import Control.Monad.Reader.Class
 import Control.Monad.State.Class
-import Control.Monad.Trans.Class
 import Control.Monad.Trans.Resource
 
 import Data.Function (on)
@@ -144,8 +144,7 @@ uploadPipeline
     . hashChunks
     . rechunkCDC
 
-
--- | A download pipeline that does not abort on errors
+-- | A download pipeline that does not abort on errors.
 downloadPipeline
     :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
     => Stream' (FileItem, ChunkList) m ()
@@ -157,6 +156,7 @@ downloadPipeline
     . retrieveChunks
     . unpackChunkLists
 
+-- | Download and deserialise the tree.
 snapshotTree
     :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
     => Snapshot
@@ -168,6 +168,74 @@ snapshotTree
     . abortOnError retrieveChunks
     . unpackChunkLists
     . snapshotChunkLists
+
+-- | Collect all chunks for the supplied snapshot, including those
+-- comprising the actual snapshot tree itself.
+collectChunks
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
+    => Snapshot
+    -> Stream' StoreID m ()
+collectChunks snapshot
+    = (S.map snd . unpackChunkLists . S.lefts $ snapshotTree snapshot) <>
+      (S.map snd . unpackChunkLists $ snapshotChunkLists snapshot)
+
+-- | Perform a chunk check, showing any garbage (unreferenced) chunks
+-- or missing chunks (!).
+chunkCheck
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Repository
+    -> m ()
+chunkCheck repo = do
+    -- Add all chunks referenced by snapshots to cache.
+    -- NOTE: this stream will potentially contain duplicate store IDs,
+    -- which the chunk cache will de-duplicate for us.
+    log' $ "Downloading snapshot chunks..."
+    sinkIntoChunkCache ChunkCache.insert
+        . showChunksReceived . S.copy
+        $ snapChunks -- has duplicate chunks
+    liftIO $ hPutStr stderr "\ESC[K"
+
+    referenced <- withChunkCache (liftIO . ChunkCache.size)
+
+    -- List all chunks in repo.
+    -- There are two sets we are interested in:
+    -- 1) missing: chunks in cache, not in this stream
+    -- 2) garbage: chunks in this stream, but not in cache
+    log' $ "Listing all chunks in repository..."
+    garbage S.:> _ <-
+          S.sum
+        . S.map (const (1::Integer))
+        . filterUsingChunkCache isGarbage
+        . showChunksReceived . S.copy
+        $ repoChunks
+    liftIO $ hPutStr stderr "\ESC[K"
+
+    missing <- withChunkCache (liftIO . ChunkCache.size)
+
+    liftIO $ do
+        putStrLn $ "Referenced: " ++ show referenced
+        putStrLn $ "Garbage:    " ++ show garbage
+        putStrLn $ "Missing:    " ++ show missing
+  where
+
+    snaps = hoist liftResourceT $ listSnapshots repo
+
+    snapChunks = S.concatMap (either err collectChunks . snd) snaps
+      where
+        err ex = errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)
+
+    repoChunks = hoist liftResourceT $ listChunks repo
+
+    isGarbage conn storeId = do
+        isMember <- ChunkCache.member conn storeId
+        if isMember
+           then ChunkCache.delete conn storeId >> return False
+           else return True
+
+    showChunksReceived = S.mapM_ $ \_ -> do
+        modify (over prChunks succ)
+        gets _prChunks >>= \n ->
+            when (n `mod` 100==0) $ putProgress $ "Chunks received: " ++ (show n)
 
 
 ------------------------------------------------------------
@@ -181,30 +249,29 @@ progressMonitor
     :: (MonadState Progress m, MonadReader Env m, MonadIO m)
     => Stream' a m r
     -> m r
-progressMonitor str = do
-    let monitor = S.mapM_ $ \_ -> do
-            Progress{..} <- get
-            startT       <- asks envStartTime
-            nowT         <- liftIO getCurrentTime
-            putProgress $ unwords $ List.intersperse " | "
-                [ "Files: "         ++ show _prFiles
-                , "Chunks: "        ++ show _prChunks
-                , "In: "            ++ show (_prInputSize  `div` megabyte) ++ " MB"
-                , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
-                , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
-                , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
-                , "Errors: "        ++ show (_prErrors)
-                ]
-    r <- monitor str
-    -- print a newline to always leave the last progress line visible at the end
-    liftIO $ hPutStrLn stderr ""
-    return r
+progressMonitor = S.mapM_ $ \_ -> do
+    Progress{..} <- get
+    startT       <- asks envStartTime
+    nowT         <- liftIO getCurrentTime
+    putProgress $ unwords $ List.intersperse " | "
+        [ "Files: "         ++ show _prFiles
+        , "Chunks: "        ++ show _prChunks
+        , "In: "            ++ show (_prInputSize  `div` megabyte) ++ " MB"
+        , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
+        , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
+        , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
+        , "Errors: "        ++ show (_prErrors)
+        ]
   where
-    -- NOTE: ("\ESC[K" ++ s ++ "\r") interleaves better with debug logging, although the cursor
-    -- sits at the beginning of the line.
-    putProgress s = liftIO $ hPutStr stderr $ "\ESC[K" ++ s ++ "\r"
     rate bytes ndt = round $ (toRational $ bytes `div` megabyte) / (toRational ndt) :: Int
     megabyte = 1024*1024
+
+-- | Write a progress reporting string to standard error after first clearing the line.
+-- NOTE: ("\ESC[K" ++ s ++ "\r") interleaves better with debug logging, although the cursor
+-- sits at the beginning of the line.
+putProgress :: MonadIO m => String -> m ()
+putProgress s = liftIO $ hPutStr stderr $ "\ESC[K" ++ s ++ "\r"
+
 
 overFileItems
     :: Monad m
@@ -277,22 +344,19 @@ dedupChunks
   => Stream' (PlainChunk t) m r
   -> Stream' (Either (PlainChunk t) (TaggedOffsets t, StoreID)) m r
 dedupChunks str = do
-    cacheFile   <- T.pack <$> resolveTempFileName' "chunks"
-    (key, conn) <- allocate (ChunkCache.connect cacheFile) ChunkCache.close
-    r <- flip S.mapM str $ \c@Chunk{..} -> do
-        -- collect some statistics
-        let chunkSize = fromIntegral $ B.length cContent
-        modify $ over prChunks    succ
-               . over prInputSize (+ chunkSize)
-        -- query chunk cache
-        isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
-        if isDuplicate
-           then -- duplicate
-               return $ Right (cOffsets, cStoreID)
-           else
-               return $ Left c
-    release key
-    return r
+    withChunkCache $ \conn ->
+        flip S.mapM str $ \c@Chunk{..} -> do
+            -- collect some statistics
+            let chunkSize = fromIntegral $ B.length cContent
+            modify $ over prChunks    succ
+                   . over prInputSize (+ chunkSize)
+            -- query chunk cache
+            isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
+            if isDuplicate
+               then -- duplicate
+                   return $ Right (cOffsets, cStoreID)
+               else
+                   return $ Left c
 
 -- | Compress and encrypt the supplied stream of chunks using multiple cores.
 encodeChunks
@@ -313,15 +377,12 @@ storeChunks
     -> Stream' (TaggedOffsets t, StoreID) m r
 storeChunks str = do
     Env{..} <- lift ask
-    cacheFile   <- T.pack <$> resolveCacheFileName' "chunks"
-    (key, conn) <- allocate (ChunkCache.connect cacheFile) ChunkCache.close
-    str' <- S.mapM_ (liftIO . ChunkCache.insert conn . snd)
-          . S.copy
-          . S.mapM measure
-          . S.parMap envTaskBufferSize envTaskGroup (storeChunk envRetries envRepository)
-          $ str
-    release key
-    return str'
+    withChunkCache $ \conn ->
+        S.mapM_ (liftIO . ChunkCache.insert conn . snd)
+              . S.copy
+              . S.mapM measure
+              . S.parMap envTaskBufferSize envTaskGroup (storeChunk envRetries envRepository)
+              $ str
   where
     measure :: (CipherChunk t, Bool) -> m (TaggedOffsets t, StoreID)
     measure (cc@Chunk{..}, isDuplicate) = do
@@ -624,3 +685,33 @@ measureStoredSize
 measureStoredSize Chunk{..} = do
     let encodedSize = fromIntegral $ B.length (cSecretBox cContent)
     modify $ over prStoredSize (+ encodedSize)
+
+-- | Run an action using a temporary chunk cache
+withChunkCache
+  :: (MonadReader Env m, MonadResource m)
+  => (ChunkCache.Connection -> m r)
+  -> m r
+withChunkCache f = do
+    cacheFile   <- T.pack <$> resolveTempFileName' "chunks"
+    (key, conn) <- allocate (ChunkCache.connect cacheFile) ChunkCache.close
+    r <- f conn
+    release key
+    return r
+
+sinkIntoChunkCache
+  :: (MonadReader Env m, MonadResource m)
+  => (ChunkCache.Connection -> a -> IO ())
+  -> Stream' a m r
+  -> m r
+sinkIntoChunkCache f str =
+    withChunkCache $ \conn ->
+        S.mapM_ (liftIO . f conn) str
+
+filterUsingChunkCache
+  :: (MonadReader Env m, MonadResource m)
+  => (ChunkCache.Connection -> a -> IO Bool)
+  -> Stream' a m r
+  -> Stream' a m r
+filterUsingChunkCache f str =
+    withChunkCache $ \conn ->
+        S.filterM (liftIO . f conn) str

@@ -26,6 +26,7 @@ module Atavachron.Repository
     , newAccessKey
     , putChunk
     , getChunk
+    , listChunks
     , listSnapshots
     , getSnapshot
     , putSnapshot
@@ -74,7 +75,7 @@ import GHC.Generics (Generic)
 import Atavachron.Chunk.CDC
 import Atavachron.Chunk.Encode
 import Atavachron.Path
-import Atavachron.Streaming
+import Atavachron.Streaming (Stream')
 import Atavachron.Store (Store, Key)
 import qualified Atavachron.Store as Store
 
@@ -286,6 +287,7 @@ mkChunkKey storeID = Store.Key path name
     name = hexEncode storeID
     path = Store.Path $ Store.unPath chunksPath <> "/" <> T.take 2 name
 
+-- | List all snapshots in the repo.
 listSnapshots
     :: Repository
     -> Stream' (SnapshotName, Either SomeException Snapshot) (ResourceT IO) ()
@@ -294,6 +296,16 @@ listSnapshots repo = do
         keyStr = Store.list store snapshotsPath
     S.zip (S.map Store.kName keyStr)
         $ S.mapM (liftIO . getSnapshotByKey repo) keyStr
+
+-- | List all chunks in the repo!
+-- Used by garbage collection and chunk existence check.
+listChunks
+    :: Repository
+    -> Stream' StoreID (ResourceT IO) ()
+listChunks repo = do
+    let store = repoStore repo
+    S.map (hexDecode . Store.kName)
+        $ Store.list store chunksPath
 
 -- | Retrieve a snapshot by a potentially partial key.
 getSnapshot :: Repository -> SnapshotName -> IO (Either SomeException Snapshot)

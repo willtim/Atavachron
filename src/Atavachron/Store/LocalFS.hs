@@ -1,9 +1,11 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ViewPatterns #-}
 
--- | Local filesystem Store, intended only for testing.
+-- | Local filesystem Store, intended mainly for testing.
 --
 module Atavachron.Store.LocalFS where
 
+import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
 
@@ -28,9 +30,8 @@ newLocalFS name root = Store{..}
     list :: Store.Path -> Stream' Store.Key (ResourceT IO) ()
     list path@(Store.Path p) = do
         liftIO $ ensureSubdir path
-        dirName <- liftIO $ (</> T.unpack p) <$> getFilePath root
-        entries <- liftIO $ Dir.listDirectory dirName
-        S.each $ map (Store.Key path . T.pack) entries
+        dir <- liftIO $ (T.pack . (</> T.unpack p)) <$> getFilePath root
+        listFilesRecursively (Store.Path dir)
 
     get :: Store.Key -> IO LB.ByteString
     get key = do
@@ -58,3 +59,14 @@ newLocalFS name root = Store{..}
     ensureSubdir (Store.Path p) = do
         dir <- (</> T.unpack p) <$> getFilePath root
         Dir.createDirectoryIfMissing True dir
+
+
+listFilesRecursively :: Store.Path -> Stream' Store.Key (ResourceT IO) ()
+listFilesRecursively path@(Store.Path (T.unpack -> dir)) = do
+    files <- liftIO $ Dir.listDirectory dir
+    forM_ files $ \file -> do
+        let dir' = dir </> file
+        exists <- liftIO $ Dir.doesDirectoryExist dir'
+        if exists
+            then listFilesRecursively $ Store.Path (T.pack dir')
+            else S.yield $ Store.Key path (T.pack file)
