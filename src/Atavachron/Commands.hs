@@ -415,10 +415,21 @@ addAccessKey repoURL name = do
     saveCredentials (urlText repoURL) cc
 
 runBackup :: Maybe Config -> Repository -> Path Abs Dir -> FileGlobs -> Bool -> IO ()
-runBackup mcfg repo sourceDir globs forceFullScan = do
+runBackup mcfg repo sourceDir globs forceFullScan' = do
     env      <- makeEnv mcfg repo sourceDir globs
-    -- TODO read last snapshot written and check that it still exists, if it doesn't
-    -- force a full scan.
+    -- read the last snapshot written and check that it still exists, if it doesn't
+    -- force a full scan, since we cannot use the files cache.
+    mLastKey      <- runReaderT readLastSnapshotKey env
+    forceFullScan <-
+        case mLastKey of
+            Just key | not forceFullScan' -> do
+                haveLastSnap <- Repository.doesSnapshotExist repo key
+                when (not haveLastSnap) $
+                    warn' $ "Could not find previous snapshot '" <> key <> "', forcing full scan."
+                return $ not haveLastSnap
+            Nothing  | not forceFullScan' -> return True -- full scan if no previous key
+            _ -> return True
+
     snapshot <-
         runResourceT
           . flip evalStateT initialProgress
@@ -432,7 +443,8 @@ runBackup mcfg repo sourceDir globs forceFullScan = do
             -- print a newline to always leave the last stderr progress line visible at the end
             liftIO $ IO.hPutStr IO.stderr "\n"
             log' $ "Wrote snapshot " <> T.take 8 key
-            runReaderT (commitFilesCache >> cleanUpTempFiles) env
+            flip runReaderT env $
+                commitFilesCache >> writeLastSnapshotKey key >> cleanUpTempFiles
 
 runVerify :: Maybe Config -> Repository -> Snapshot -> FileGlobs -> IO ()
 runVerify mcfg repo snapshot globs = do

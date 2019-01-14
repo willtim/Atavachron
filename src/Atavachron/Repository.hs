@@ -30,6 +30,7 @@ module Atavachron.Repository
     , listSnapshots
     , getSnapshot
     , putSnapshot
+    , doesSnapshotExist
     , putProgramBinary
     , initRepository
     , authenticate
@@ -330,6 +331,17 @@ getSnapshotByKey repo key = do
     e'blob <- try (Store.get (repoStore repo) key)
     return $ e'blob >>= decrypt (unChunkKey mChunkKey)
                                 (toException $ SnapshotDecryptFailed key)
+
+-- | Query the store for the existence of a snapshot using a potentially partial key.
+doesSnapshotExist :: Repository -> SnapshotName -> IO Bool
+doesSnapshotExist repo partialKey = do
+    -- for now we will just list all the snapshots and search them
+    runResourceT
+        . S.fold_ (\_ _ -> True) False id
+        . S.filter match
+        $ Store.list (repoStore repo) snapshotsPath
+  where
+    match (Store.Key _ name) = partialKey `T.isPrefixOf` name
 
 -- | Put the snapshot in the repository and generate a key for it.
 putSnapshot :: Repository -> Snapshot -> IO (Either SomeException SnapshotName)

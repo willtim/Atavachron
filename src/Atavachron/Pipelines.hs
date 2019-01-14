@@ -38,6 +38,7 @@ import qualified Data.ByteString.Lazy as LB
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.IO as T
 import Data.Time.Clock
 
 import qualified Data.List as List
@@ -463,6 +464,25 @@ readFilesCache = do
     S.map (ceFileItem &&& ceChunkList)
         . absolutePaths sourceDir
         $ readCacheFile cacheFile
+
+readLastSnapshotKey
+    :: (MonadReader Env m, MonadIO m)
+    => m (Maybe SnapshotName)
+readLastSnapshotKey = do
+    fp <- genFilesCacheName "last_snapshot" >>= resolveCacheFileName'
+    liftIO $ do
+        exists <- Dir.doesFileExist fp
+        if exists
+            then Just <$> T.readFile fp
+            else return Nothing
+
+writeLastSnapshotKey
+    :: (MonadReader Env m, MonadIO m)
+    => SnapshotName
+    -> m()
+writeLastSnapshotKey key = do
+    fp <- genFilesCacheName "last_snapshot" >>= resolveCacheFileName'
+    liftIO $ T.writeFile fp key
 
 -- Generate a file cache file name from the absolute path of the source directory.
 genFilesCacheName :: MonadReader Env m => RawName -> m RawName
