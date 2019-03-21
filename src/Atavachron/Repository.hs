@@ -22,22 +22,30 @@ module Atavachron.Repository
     , CachedCredentials
     , ManifestKey
       -- * Functions
-    , newManifest
-    , newAccessKey
-    , putChunk
-    , getChunk
-    , listChunks
-    , listSnapshots
-    , getSnapshot
-    , putSnapshot
-    , doesSnapshotExist
-    , putProgramBinary
-    , initRepository
     , authenticate
     , authenticate'
-    , listAccessKeys
+    , deleteGarbageChunk
+    , deleteSnapshot
+    , doesSnapshotExist
+    , garbageCollectChunk
     , getAccessKey
+    , getChunk
+    , getGarbageModTime
+    , getSnapshot
+    , hasGarbageChunk
+    , initRepository
+    , listAccessKeys
+    , listChunks
+    , listGarbageChunks
+    , listSnapshots
+    , listSnapshotsForSource
+    , newAccessKey
+    , newManifest
     , putAccessKey
+    , putChunk
+    , putProgramBinary
+    , putSnapshot
+    , restoreGarbageChunk
     ) where
 
 import Codec.Serialise
@@ -56,6 +64,7 @@ import qualified Crypto.Saltine.Class as Saltine
 import qualified Crypto.Saltine.Core.SecretBox as SecretBox
 import qualified Crypto.Saltine.Internal.ByteSizes as ByteSizes
 
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
 
 import Data.Maybe
@@ -243,6 +252,9 @@ snapshotsPath = Store.Path "snapshots"
 chunksPath :: Store.Path
 chunksPath = Store.Path "chunks"
 
+garbagePath :: Store.Path
+garbagePath = Store.Path "garbage"
+
 keysPath :: Store.Path
 keysPath = Store.Path "keys"
 
@@ -253,16 +265,24 @@ manifestStoreKey :: Store.Key
 manifestStoreKey = Store.Key rootPath "atavachron-manifest"
 
 -- | Get the chunk associated with a key, if it exists.
--- NOTE: We first check that the key exists, so that we can return a known exception
+-- NOTE:
+-- 1) We first check that the key exists, so that we can return a known exception
 -- in the case that the object is unexpectedly missing.
+-- 2) If we cannot find the chunk in the chunks folder, we check the garbage folder.
 getChunk :: Repository -> StoreID -> IO (Either SomeException CipherText)
 getChunk Repository{..} storeID = do
-    let key     = mkChunkKey storeID
-    e'present <- try (Store.hasKey repoStore key)
-    case e'present of
-       Right True  -> (>>= deserialise') <$> try (Store.get repoStore key)
-       Right False -> return (Left $ toException $ MissingObject key)
-       Left ex     -> return $ Left ex
+    res <- get chunksPath
+    case res of
+        Left (fromException -> Just (MissingObject{})) -> get garbagePath
+        _ -> return res
+  where
+    get path = do
+        let key = mkChunkKey path storeID
+        e'present <- try (Store.hasKey repoStore key)
+        case e'present of
+            Right True  -> (>>= deserialise') <$> try (Store.get repoStore key)
+            Right False -> return (Left $ toException $ MissingObject key)
+            Left ex     -> return $ Left ex
 
 -- | Put the chunk under the supplied content-derived key, if no existing entry present.
 -- Returns true if the chunk was already present in the repository.
@@ -272,21 +292,21 @@ getChunk Repository{..} storeID = do
 putChunk :: Repository -> StoreID -> CipherText -> IO (Either SomeException Bool)
 putChunk Repository{..} storeID chunk = do
     let pickled = serialise chunk
-        key     = mkChunkKey storeID
+        key     = mkChunkKey chunksPath storeID
     e'present <- try (Store.hasKey repoStore key)
     case e'present of
        Right True  -> return $ Right True -- entry already exists, no need to do anything more
        Right False -> fmap (const False) <$> try (Store.put repoStore key pickled)
        Left ex     -> return $ Left ex
 
--- Chunks get stored under an additional folder which corresponds to the first
+-- | Chunks get stored under an additional folder which corresponds to the first
 -- two characters of the hex-encoded Store ID. This helps avoid creating too
 -- many entries in a single directory, which can cause problems for some filesystems.
-mkChunkKey :: StoreID -> Key
-mkChunkKey storeID = Store.Key path name
+mkChunkKey :: Store.Path -> StoreID -> Key
+mkChunkKey parentPath storeID = Store.Key path name
   where
     name = hexEncode storeID
-    path = Store.Path $ Store.unPath chunksPath <> "/" <> T.take 2 name
+    path = Store.Path $ Store.unPath parentPath <> "/" <> T.take 2 name
 
 -- | List all snapshots in the repo.
 listSnapshots
@@ -298,6 +318,22 @@ listSnapshots repo = do
     S.zip (S.map Store.kName keyStr)
         $ S.mapM (liftIO . getSnapshotByKey repo) keyStr
 
+-- | List snapshots for a particular hostname and sourceDir.
+-- TODO
+-- we should offer the ability to filter by more than just
+-- hostName and sourceDir, for example: user name or date/time.
+listSnapshotsForSource
+    :: Repository
+    -> (Text, Path Abs Dir)
+    -> Stream' (SnapshotName, Either SomeException Snapshot) (ResourceT IO) ()
+listSnapshotsForSource repo (hostName, sourceDir) =
+    S.filter snapshotsFilter $ listSnapshots repo
+  where
+    snapshotsFilter (_, Right s) =
+        sHostName s == hostName &&
+        sHostDir s  == sourceDir
+    snapshotsFilter _ = True -- always want to report errors
+
 -- | List all chunks in the repo!
 -- Used by garbage collection and chunk existence check.
 listChunks
@@ -307,6 +343,16 @@ listChunks repo = do
     let store = repoStore repo
     S.map (hexDecode . Store.kName)
         $ Store.list store chunksPath
+
+-- | List all garbage chunks in the repo!
+-- Used by garbage deletion and chunk existence check.
+listGarbageChunks
+    :: Repository
+    -> Stream' StoreID (ResourceT IO) ()
+listGarbageChunks repo = do
+    let store = repoStore repo
+    S.map (hexDecode . Store.kName)
+        $ Store.list store garbagePath
 
 -- | Retrieve a snapshot by a potentially partial key.
 getSnapshot :: Repository -> SnapshotName -> IO (Either SomeException Snapshot)
@@ -345,18 +391,66 @@ doesSnapshotExist repo partialKey = do
 
 -- | Put the snapshot in the repository and generate a key for it.
 putSnapshot :: Repository -> Snapshot -> IO (Either SomeException SnapshotName)
-putSnapshot repo snapshot = do
-    let Manifest{..} = repoManifest repo
-        pickled  = LB.toStrict $ serialise snapshot
-        storeID  = hashBytes mStoreIDKey pickled
-        key      = Store.Key snapshotsPath $ hexEncode storeID
+putSnapshot Repository{..} snapshot = do
+    let (key, pickled) = computeSnapshotKey repoManifest snapshot
 
     debug' $ "Writing snapshot with key: " <> Store.kName key
 
-    res <- encryptBytes (unChunkKey mChunkKey) pickled
-               >>= try . Store.put (repoStore repo) key . serialise
+    res <- encryptBytes (unChunkKey $ mChunkKey repoManifest) pickled
+               >>= try . Store.put repoStore key . serialise
 
     return $ const (Store.kName key) <$> res
+
+-- | Permanently delete a snapshot. Used by the pruning command.
+-- NOTE: This is a destructive update!
+deleteSnapshot :: Repository -> Snapshot -> IO (Either SomeException ())
+deleteSnapshot Repository{..} snapshot = do
+    let key = fst $ computeSnapshotKey repoManifest snapshot
+    debug' $ "Deleting snapshot: " <> Store.kName key
+    try (Store.delete repoStore key)
+
+-- | Does the supplied storeID exist in the garbage folder?
+hasGarbageChunk :: Repository -> StoreID -> IO (Either SomeException Bool)
+hasGarbageChunk Repository{..} storeID = do
+    let key = mkChunkKey garbagePath storeID
+    try (Store.hasKey repoStore key)
+
+-- | When was this chunk marked as garbage?
+getGarbageModTime :: Repository -> StoreID -> IO (Either SomeException UTCTime)
+getGarbageModTime Repository{..} storeID = do
+    let key = mkChunkKey garbagePath storeID
+    try (Store.modTime repoStore key)
+
+-- | Restore a chunk from the garbage folder to the chunks folder.
+restoreGarbageChunk :: Repository -> StoreID -> IO (Either SomeException ())
+restoreGarbageChunk Repository{..} storeID = do
+    let src  = mkChunkKey garbagePath storeID
+        dest = mkChunkKey chunksPath  storeID
+    try (Store.move repoStore src dest)
+
+-- | Move an object to the garbage folder.
+-- NOTE: This is a destructive update!
+garbageCollectChunk :: Repository -> StoreID -> IO (Either SomeException ())
+garbageCollectChunk Repository{..} storeID = do
+    let srcKey  = mkChunkKey chunksPath  storeID
+        destKey = mkChunkKey garbagePath storeID
+    debug' $ "Moving to garbage: " <> Store.kName srcKey
+    try (Store.move repoStore srcKey destKey)
+
+-- | Permanently delete the garbage chunk from the repository (!)
+deleteGarbageChunk :: Repository -> StoreID -> IO (Either SomeException ())
+deleteGarbageChunk Repository{..} storeID = do
+    let key  = mkChunkKey garbagePath storeID
+    debug' $ "Deleting garbage chunk: " <> Store.kName key
+    try (Store.delete repoStore key)
+
+-- | Compute the key for a snapshot using its contents.
+computeSnapshotKey :: Manifest -> Snapshot -> (Store.Key, B.ByteString)
+computeSnapshotKey Manifest{..} snapshot = (key, pickled)
+  where
+    pickled  = LB.toStrict $ serialise snapshot
+    storeID  = hashBytes mStoreIDKey pickled
+    key      = Store.Key snapshotsPath $ hexEncode storeID
 
 -- | Put the program binary (Atavachron itself) in the repository and
 -- generate a key for it. We compress using the BZip2 file format and
@@ -390,7 +484,6 @@ initRepository store pass = do
         <$> (encryptBytes (unManifestKey manifestKey) pickled
                >>= try . Store.put store manifestStoreKey . serialise)
     newAccessKey store manifestKey "default" pass
-
 
 -- | Create and store a new access key using the supplied name and password.
 newAccessKey :: Store -> ManifestKey -> Text -> Text -> IO CachedCredentials

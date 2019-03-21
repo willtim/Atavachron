@@ -27,16 +27,17 @@ import Atavachron.Streaming (TaskGroup)
 
 -- | Environment used during backup, verify and restore.
 data Env = Env
-  { envRepository     :: Repository       -- ^ The remote destination repository.
-  , envStartTime      :: !UTCTime         -- ^ Start time of current backup.
-  , envRetries        :: !Int             -- ^ Number of times to retry failed gets and puts to the store.
-  , envTaskBufferSize :: !Int             -- ^ Size of readahead for the stream, used for parallel processing.
-  , envTaskGroup      :: !TaskGroup       -- ^ Sized with the number of processing cores.
-  , envCachePath      :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
-  , envTempPath       :: !(Path Abs Dir)  -- ^ A temporary directory for this process to use.
-  , envFilePredicate  :: !FilePredicate   -- ^ Predicate for including/excluding files to process.
-  , envDirectory      :: !(Path Abs Dir)  -- ^ The local directory being backed up or restored to.
-  , envBackupBinary   :: !Bool            -- ^ If true, include an (unencrypted) backup of the program binary.
+  { envRepository        :: Repository       -- ^ The remote destination repository.
+  , envStartTime         :: !UTCTime         -- ^ Start time of current backup.
+  , envRetries           :: !Int             -- ^ Number of times to retry failed gets and puts to the store.
+  , envTaskBufferSize    :: !Int             -- ^ Size of readahead for the stream, used for parallel processing.
+  , envTaskGroup         :: !TaskGroup       -- ^ Sized with the number of processing cores.
+  , envCachePath         :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
+  , envTempPath          :: !(Path Abs Dir)  -- ^ A temporary directory for this process to use.
+  , envFilePredicate     :: !FilePredicate   -- ^ Predicate for including/excluding files to process.
+  , envDirectory         :: !(Path Abs Dir)  -- ^ The local directory being backed up or restored to.
+  , envBackupBinary      :: !Bool            -- ^ If true, include an (unencrypted) backup of the program binary.
+  , envGarbageExpiryDays :: !Int             -- ^ A garbage expiry time in days, greater than the longest likely backup.
   }
 
 -- for now, just a predicate on the filepath

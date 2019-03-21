@@ -9,6 +9,7 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
 
+import Data.Time
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -35,7 +36,6 @@ newLocalFS name root = Store{..}
 
     get :: Store.Key -> IO LB.ByteString
     get key = do
-        ensureSubdir $ Store.kPath key
         fileName <- keyToFileName key
         LB.readFile fileName
 
@@ -47,9 +47,25 @@ newLocalFS name root = Store{..}
 
     hasKey :: Store.Key -> IO Bool
     hasKey key = do
-        ensureSubdir $ Store.kPath key
         fileName <- keyToFileName key
         Dir.doesFileExist fileName
+
+    move :: Store.Key -> Store.Key -> IO ()
+    move src dest = do
+        ensureSubdir $ Store.kPath dest
+        srcFile  <- keyToFileName src
+        destFile <- keyToFileName dest
+        Dir.renameFile srcFile destFile
+
+    delete :: Store.Key -> IO ()
+    delete key = do
+        fileName <- keyToFileName key
+        Dir.removeFile fileName
+
+    modTime :: Store.Key -> IO UTCTime
+    modTime key = do
+        fileName <- keyToFileName key
+        Dir.getModificationTime fileName
 
     keyToFileName :: Store.Key -> IO FilePath
     keyToFileName (Store.Key (Store.Path prefix) k) =

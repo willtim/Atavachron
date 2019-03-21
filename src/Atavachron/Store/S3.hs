@@ -38,6 +38,7 @@ import qualified Aws
 import qualified Aws.Core as Aws
 import qualified Aws.S3 as S3
 
+import           Data.Time
 import           System.Directory
 import           System.FilePath
 
@@ -70,6 +71,15 @@ newS3Store name endpoint bucketName = do
 
         hasKey :: Store.Key -> IO Bool
         hasKey key = doesObjectExist params bucketName (toObjectKey key)
+
+        move :: Store.Key -> Store.Key -> IO ()
+        move src dest = moveObject params bucketName (toObjectKey src) (toObjectKey dest)
+
+        delete :: Store.Key -> IO ()
+        delete key = deleteObject params bucketName (toObjectKey key)
+
+        modTime :: Store.Key -> IO UTCTime
+        modTime key = objectModTime params bucketName (toObjectKey key)
 
         toObjectKey :: Store.Key -> ObjectKey
         toObjectKey (Store.Key (Store.Path prefix) k) =
@@ -136,6 +146,38 @@ putObject' (cfg, s3cfg) b k bytes = do
                 S3.putObject b k body
         return ()
 
+-- NOTE: Move has to be implemented as a copy followed by a delete.
+moveObject
+    :: (Config, Endpoint)
+    -> BucketName    -- ^ The bucket to store the file in.
+    -> ObjectKey     -- ^ The source object key.
+    -> ObjectKey     -- ^ The destination object key.
+    -> IO ()
+moveObject (cfg, s3cfg) b k1 k2 = do
+    mgr <- newManager tlsManagerSettings
+    runResourceT $ do
+        S3.CopyObjectResponse {} <-
+            Aws.pureAws cfg s3cfg mgr $
+                let src = S3.ObjectId {oidBucket=b, oidObject=k1, oidVersion=Nothing}
+                in S3.copyObject b k2 src S3.CopyMetadata
+        S3.DeleteObjectResponse {} <-
+            Aws.pureAws cfg s3cfg mgr $
+                S3.DeleteObject {doObjectName=k1,doBucket=b}
+        return ()
+
+deleteObject
+    :: (Config, Endpoint)
+    -> BucketName    -- ^ The bucket to store the file in.
+    -> ObjectKey     -- ^ The object to delete.
+    -> IO ()
+deleteObject (cfg, s3cfg) b k = do
+    mgr <- newManager tlsManagerSettings
+    runResourceT $ do
+        S3.DeleteObjectResponse {} <-
+            Aws.pureAws cfg s3cfg mgr $
+                S3.DeleteObject {doObjectName=k,doBucket=b}
+        return ()
+
 doesObjectExist
     :: (Config, Endpoint)
     -> BucketName
@@ -154,6 +196,18 @@ doesObjectExist (cfg, s3cfg) b k = do
     selector (HttpExceptionRequest _ (StatusCodeException res _))
         | statusCode (responseStatus res) == 404 = Just () -- do we need this check?
     selector _ = Nothing
+
+objectModTime
+    :: (Config, Endpoint)
+    -> BucketName
+    -> ObjectKey
+    -> IO UTCTime
+objectModTime (cfg, s3cfg) b k = do
+    mgr <- newManager tlsManagerSettings
+    runResourceT $ do
+        S3.HeadObjectResponse (Just meta) <-
+            Aws.pureAws cfg s3cfg mgr $ S3.headObject b k
+        return $ S3.omLastModified meta
 
 
 -- | The default configuration, with credentials loaded from

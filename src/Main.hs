@@ -11,7 +11,7 @@ import Paths_atavachron (version)
 import Data.Version (showVersion)
 
 import Atavachron.Commands
-import Atavachron.Config (URL(..))
+import Atavachron.Config (URL(..), PruneSettings(..))
 
 data Options = Options
   { optCommand    :: Command
@@ -30,6 +30,7 @@ optionsP = Options
     <> command "list"      (info listOptionsP     ( progDesc "List files for a particular snapshot." ))
     <> command "diff"      (info diffOptionsP     ( progDesc "Diff two snapshots." ))
     <> command "keys"      (info keyOptionsP      ( progDesc "Management of password-protected access keys."))
+    <> command "prune"     (info pruneOptionsP    ( progDesc "Prune snapshots in the repository."))
     <> command "chunks"    (info chunkOptionsP    ( progDesc "Chunk management and statistics."))
     <> command "config"    (info configOptionsP   ( progDesc "Validate or generate a configuration file."))
     -- <> command "help"      (info helpOptionsP    ( progDesc "Help for a particular command."))
@@ -51,7 +52,8 @@ logLevelP = flag LevelInfo LevelDebug
 
 initOptionsP :: Parser Command
 initOptionsP = CInit <$>
-    ((InitOptions <$> repoUrlP) <|> (InitOptionsProfile <$> profileNameP))
+    (InitOptions <$> repoUrlP
+     <|> InitOptionsProfile <$> profileNameP)
 
 backupOptionsP :: Parser Command
 backupOptionsP = CBackup <$>
@@ -74,8 +76,8 @@ restoreOptionsP = CRestore <$>
 
 snapshotOptionsP :: Parser Command
 snapshotOptionsP = CSnapshots <$>
-    ((SnapshotOptions <$> repoUrlP <*> optional sourceDirP) <|>
-     (SnapshotOptionsProfile <$> profileNameP))
+    (SnapshotOptions <$> repoUrlP <*> optional sourceDirP
+     <|> SnapshotOptionsProfile <$> profileNameP)
 
 listOptionsP :: Parser Command
 listOptionsP = CList <$>
@@ -94,6 +96,11 @@ keyOptionsP = CKeys <$>
     ((KeyOptions <$> repoUrlP <|> KeyOptionsProfile <$> profileNameP)
     <*> keysArgP)
 
+pruneOptionsP :: Parser Command
+pruneOptionsP = CPrune <$>
+    ((PruneOptions <$> repoUrlP <*> optional sourceDirP <*> pruneSettingsP
+     <|> PruneOptionsProfile <$> profileNameP) <*> dryRunP)
+
 chunkOptionsP :: Parser Command
 chunkOptionsP = CChunks <$>
     ((ChunkOptions <$> repoUrlP <|> ChunkOptionsProfile <$> profileNameP)
@@ -106,7 +113,7 @@ keysArgP :: Parser KeysArgument
 keysArgP = listKeysP <|> addKeyP
 
 chunksArgP :: Parser ChunksArgument
-chunksArgP = checkChunksP
+chunksArgP = checkChunksP <|> repairChunksP <|> exhaustiveGCP <|> deleteGarbageP
 
 validateP :: Parser ConfigOptions
 validateP = flag' ValidateConfig
@@ -132,10 +139,37 @@ addKeyP = AddKey <$> strOption
   <> metavar "NAME"
   <> help "Add access key" )
 
+pruneSettingsP :: Parser PruneSettings
+pruneSettingsP = PruneSettings
+  <$> (optional . option auto $ long "keep-daily")
+  <*> (optional . option auto $ long "keep-weekly")
+  <*> (optional . option auto $ long "keep-monthly")
+  <*> (optional . option auto $ long "keep-yearly")
+
+dryRunP :: Parser Bool
+dryRunP = flag False True
+  (  long "dry-run"
+  <> help "only print the indended updates and don't perform them" )
+
 checkChunksP :: Parser ChunksArgument
 checkChunksP = flag' CheckChunks
   (  long "check"
   <> help "check for garbage or missing chunks" )
+
+repairChunksP :: Parser ChunksArgument
+repairChunksP = flag' RepairChunks
+  (  long "repair"
+  <> help "restore any referenced garbage chunks" )
+
+exhaustiveGCP :: Parser ChunksArgument
+exhaustiveGCP = flag' ExhaustiveGC
+  (  long "exhaustive-gc"
+  <> help "perform an exhaustive garbage collection" )
+
+deleteGarbageP :: Parser ChunksArgument
+deleteGarbageP = flag' DeleteGarbage
+  (  long "delete-garbage"
+  <> help "permanently delete all expired garbage from the repository" )
 
 sourceDirP :: Parser Text
 sourceDirP = strOption
@@ -196,7 +230,7 @@ main = do
                ( fullDesc
                  <> header (unwords [ "Atavachron"
                                     , showVersion version
-                                    , "© 2018 Tim Williams"
+                                    , "© 2018-2019 Tim Philip Williams"
                                     ]))
     withStdoutLogging $ do
         setLogLevel (optLogLevel options)

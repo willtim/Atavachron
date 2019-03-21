@@ -68,6 +68,16 @@ To create an additional access key with its own password, use the following:
 
 Note that currently keys can only be revoked by deleting them manually from the Store, e.g. by using the Amazon S3 dashboard.
 
+### Pruning
+
+Prune will delete snapshots using a supplied retention policy. For example:
+
+    $ atavachron prune -r file:///home/tim/test-repo --keep-daily 5 --keep-monthly 3
+
+Note that it is distinct backups that count, e.g. keep 5 days means the last 5 recent distinct days. Snapshots selected by previous rules are not considered by later rules.
+
+Prune will result in some chunks being marked as *garbage*. These are only ever deleted by issuing a `chunks --delete-garbage` command provided that the configured garbage expiry time has been exceeded for each garbage chunk considered. The expiry time defaults to 30 days and is intended to reflect the maximum possible backup time. This optimistic concurrency scheme permits concurrent backups during a prune. Concurrent prunes may generate warnings (a snapshot already deleted, or a chunk already collected as garbage).
+
 ### Backing up to Amazon S3
 
 To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a regional endpoint and bucket:
@@ -79,7 +89,7 @@ A list of all the Amazon regional endpoints can be found [here](https://docs.aws
 
 ## Repository structure
 
-The repository structure is common to all store back-ends. At the root of the repository there is an encrypted file 'atavachron-manifest' which contains metadata such as the keys necessary to encrypt/decrypt/hash all chunks and snapshots. The chunks and snapshots are stored under their associated folders using content-derived keys. The 'keys' folder contains named access keys, which can be used to obtain the manifest encryption key and thus access to the repository, when combined with a matching password.
+The repository structure is common to all store back-ends. At the root of the repository there is an encrypted file 'atavachron-manifest' which contains metadata such as the keys necessary to encrypt/decrypt/hash all chunks and snapshots. The chunks and snapshots are stored under their associated folders using content-derived keys. The 'keys' folder contains named access keys, which can be used to obtain the manifest encryption key and thus access to the repository, when combined with a matching password. The 'garbage' folder contains chunks that are believed to be no longer referenced by any snapshots in the repository, they are not visible to de-duplication, but they are still available to the restore command.
 
     .
     ├── chunks
@@ -91,6 +101,7 @@ The repository structure is common to all store back-ends. At the root of the re
     │   └── default
     ├── atavachron-manifest
     ├── bin
+    ├── garbage
     └── snapshots
         └── 83f992ba4df155eef874b4708799a1a03d0bd1954b25802ddeb497053a0cc745
 
@@ -101,17 +112,19 @@ The bin folder optionally contains Atavachron binaries that were used to generat
 
 Atavachron can make use of an optional configuration file, which as well as allowing us to tweak various runtime parameters, also allows us to save and recall one or more sets of backup parameters as "profiles". The following is an example configuration file, with a single profile:
 
-    { cachePath      = Default{} -- location of the files, chunks and repository credentials caches
-    , taskThreads    = Default{} -- number of lightweight threads used to chunk and upload/download
-    , taskBufferSize = Default{} -- number of concurrent tasks processed by the threads
-    , maxRetries     = 10        -- maximum number of retries before failure
-    , backupBinary   = True      -- backup the atavachron binary
+    { cachePath         = Default{} -- location of the files, chunks and repository credentials caches
+    , taskThreads       = Default{} -- number of lightweight threads used to chunk and upload/download
+    , taskBufferSize    = Default{} -- number of concurrent tasks processed by the threads
+    , garbageExpiryDays = Default{} -- a garbage expiry time in days, greater than the longest likely backup
+    , maxRetries        = 10        -- maximum number of retries before failure
+    , backupBinary      = True      -- backup the atavachron binary
     , profiles =
        [ { name = "pictures"
          , location ="s3://s3-eu-west-2.amazonaws.com/tims-backup"
          , source = "/tank/backups/tim/Pictures"
          , include = []
          , exclude = ["**/*.mp4", "**/*.VID"]
+         , pruning = Disabled{}
          }
        ]
     }
@@ -136,7 +149,7 @@ They will be more appropriate in most cases. However, typically other backup pro
 
 ### What exactly do you mean by scalable?
 
-Atavachron is scalable because the problem size (i.e. the number of files to be backed up) is not limited by the available memory of the machine performing the backup. It should be possible to backup terabytes of data using only a few hundred megabytes of working memory. That said, there are some minor limitations, for example we do need to realise all the file names of a particular directory in memory in order to sort them and diff them. However, this is unlikely to be an issue in practice.
+Atavachron is scalable because the problem size (i.e. the number of files to be backed up) is not limited by the available memory of the machine performing the backup. It should be possible to backup many terabytes of data using a few gigabytes of working memory at most (depending on the level of concurrency configured). That said, there are some minor limitations, for example we do need to realise all the file names of a particular directory in memory in order to sort them and diff them. However, this is unlikely to be an issue in practice.
 
 ### What exactly do you mean by fast?
 
@@ -151,6 +164,10 @@ The chunks are then hashed using a secret key; and then, only if necessary, comp
 ### How secure is it?
 
 The highly regarded *Libsodium* provides the high-level APIs for use by cryptography non-experts such as myself. Atavachron hashes using HMAC-SHA512 and encrypts using an XSalsa20 stream cipher with Poly1305 MAC authentication. For passwords, Atavachron uses Scrypt to generate an *access key* from a password and random salt. This access key is used to encrypt the manifest key which unlocks the repository manifest and therefore all the data within the repository. The encrypted manifest key and password salt are written into the store under /keys/ using a label chosen by the user. This scheme supports multiple passwords to the repository and the possibility of revoking/changing a password.
+
+### How does prune work without locks?
+
+Concurrent backups work well without any locks, since we are only ever appending to the repository. Pruning snapshots does however present problems, since we will need to delete chunks potentially referenced by other snapshots, including snapshots that are not yet visible. In order to support eventually-consistent storage like Amazon S3, we cannot safely use locks and so instead rely on a two-staged approach to pruning. The actual 'prune' command deletes only snapshot files and moves any chunks no longer referenced by the remaining snapshots into a garbage folder (garbage collection). If there is a concurrent backup running, it's possible that some chunks which were *optimistically* marked as garbage, turn out to be referenced once the concurrent backup completes. Such chunks will be restored as part of the `chunks --delete-garbage` command, which runs a repair prior to actually deleting the garbage. This command permanently deletes any garbage that matches the configured garbage expiry time (which defaults to 30 days). The expiry time should be set to exceed the longest likely backup time and ensures that any concurrently running backup that started before the last prune operation will have finished.
 
 ### Why Haskell?
 

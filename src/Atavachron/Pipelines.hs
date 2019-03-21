@@ -18,7 +18,7 @@
 module Atavachron.Pipelines where
 
 import Prelude hiding (concatMap)
-import Control.Arrow ((+++),(&&&))
+import Control.Arrow ((+++), (&&&))
 import Control.Lens (over)
 import Control.Logging
 import Control.Monad
@@ -35,6 +35,8 @@ import Data.Function (on)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LB
+import Data.Maybe (isNothing)
+import Data.Time.Calendar (diffDays)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -58,7 +60,6 @@ import qualified System.Posix.User as User
 import qualified System.Directory as Dir
 
 import Network.HostName (getHostName)
-
 import qualified Network.URI.Encode as URI
 
 import Atavachron.Repository
@@ -180,64 +181,288 @@ collectChunks snapshot
     = (S.map snd . unpackChunkLists . S.lefts $ snapshotTree snapshot) <>
       (S.map snd . unpackChunkLists $ snapshotChunkLists snapshot)
 
--- | Perform a chunk check, showing any garbage (unreferenced) chunks
--- or missing chunks (!).
+-- | Perform a chunk check, reporting:
+-- * number of chunks referenced by snapshots in the repository;
+-- * any (unreferenced) chunks eligible for garbage collection;
+-- * referenced garbage eligible for repair;
+-- * chunks missing from the repository entirely;
+-- * number of garbage chunks.
 chunkCheck
     :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
     => Repository
     -> m ()
 chunkCheck repo = do
-    -- Add all chunks referenced by snapshots to cache.
-    -- NOTE: this stream will potentially contain duplicate store IDs,
-    -- which the chunk cache will de-duplicate for us.
-    log' $ "Downloading snapshot chunks..."
-    sinkIntoChunkCache ChunkCache.insert
-        . showChunksReceived . S.copy
-        $ snapChunks -- has duplicate chunks
-    liftIO $ hPutStr stderr "\ESC[K"
+    assertCacheEmpty
 
-    referenced <- withChunkCache (liftIO . ChunkCache.size)
+    -- Add chunks referenced by all snapshots in the repository to cache.
+    log' $ "Listing chunks referenced by snapshots..."
+    sinkChunks snapChunks ChunkCache.insert
 
-    -- List all chunks in repo.
+    -- This is all referenced chunks from all repository snapshots
+    -- (some may unfortunately have been moved to garbage, due to
+    -- concurrent backups running during a prune).
+    referenced  <- cacheSize
+
+    -- List all chunks in repo and remove them from the cache.
     -- There are two sets we are interested in:
     -- 1) missing: chunks in cache, not in this stream
-    -- 2) garbage: chunks in this stream, but not in cache
+    -- 2) collectable: chunks in this stream, but not in cache
     log' $ "Listing all chunks in repository..."
-    garbage S.:> _ <-
-          S.sum
-        . S.map (const (1::Integer))
-        . filterUsingChunkCache isGarbage
-        . showChunksReceived . S.copy
-        $ repoChunks
-    liftIO $ hPutStr stderr "\ESC[K"
+    collectable S.:> _ <- count $ filterNotInChunkCache repoChunks
+    missing <- cacheSize
 
-    missing <- withChunkCache (liftIO . ChunkCache.size)
+    -- List all garbage chunks in repo.
+    -- There are an additional three sets we are interested in:
+    -- 1) referenced garbage: chunks in cache and in garbage stream
+    -- 2) garbage (unreferenced): chunks not in cache, but in the stream
+    -- 3) missing completely: chunks in cache, but not in stream
+    log' $ "Listing all garbage chunks in repository..."
+    unreferenced_garbage S.:> _ <- count $ filterNotInChunkCache garbageChunks
+    missing_completely <- cacheSize
+
+    let referenced_garbage = missing - missing_completely
 
     liftIO $ do
-        putStrLn $ "Referenced: " ++ show referenced
-        putStrLn $ "Garbage:    " ++ show garbage
-        putStrLn $ "Missing:    " ++ show missing
+        log' $ "Referenced from snapshots:   " <> T.pack (show referenced)
+        log' $ "Collectable as garbage:      " <> T.pack (show collectable)
+        log' $ "Referenced garbage:          " <> T.pack (show referenced_garbage)
+        log' $ "Unreferenced garbage:        " <> T.pack (show unreferenced_garbage)
+        log' $ "Missing from repository (!): " <> T.pack (show missing_completely)
+
+    when (referenced_garbage > 0) $
+        warn' $ T.pack $ unlines
+            [ "The repository contains garbage that is currently referenced by one or more snapshots."
+            , "This can occur as a result of running backups and prune concurrently."
+            , "It can be fixed by the chunks '--repair' flag."
+            , "Note that repair is automatically run first as part of the --delete-garbage operation."
+            ]
+
+    when (missing_completely > 0) $
+        errorL' $ T.pack $ unlines
+            [ "The repository appears corrupt in that there are missing chunks!"
+            , "Please verify the latest snapshots!"
+            ]
   where
+    count = S.sum . S.map (const (1::Integer))
 
-    snaps = hoist liftResourceT $ listSnapshots repo
+    cacheSize = withChunkCache $ liftIO . ChunkCache.size
 
-    snapChunks = S.concatMap (either err collectChunks . snd) snaps
+    snapChunks = S.concatMap (collectChunks . snd) $ listSnapshotsPartial repo
+    repoChunks = hoist liftResourceT $ listChunks repo
+    garbageChunks = hoist liftResourceT $ listGarbageChunks repo
+
+    -- Filters the supplied chunk stream such that it includes only
+    -- store ids that are *not* in the chunk cache. StoreIds filtered
+    -- out are also then removed from the chunk cache.
+    filterNotInChunkCache chunksStr = do
+        withChunkCache $ \conn ->
+            S.filterM (liftIO . isNotInCache conn)
+            . showChunksReceived . S.copy
+            $ chunksStr
+        lift resetStdErrCursor
       where
-        err ex = errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)
+        isNotInCache conn storeID = do
+            isMember <- ChunkCache.member conn storeID
+            if isMember
+               then ChunkCache.delete conn storeID >> return False
+               else return True
 
+-- | Repair any referenced garbage chunks by promoting them back to the main chunks set.
+-- This situation can occur as a result of running backups and prune concurrently.
+-- Note that check/repair should always be done first as part of the --delete-garbage operation."
+chunkRepair
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Repository
+    -> m ()
+chunkRepair repo = do
+    assertCacheEmpty
+
+    -- Add chunks referenced by all snapshots in the repository to cache.
+    log' $ "Listing chunks referenced by snapshots..."
+    sinkChunks snapChunks ChunkCache.insert
+
+    -- List all chunks in repo and remove them from the cache.
+    -- The cache should then contain missing chunks.
+    log' $ "Listing all chunks in repository..."
+    sinkChunks repoChunks ChunkCache.delete
+
+    withChunkCache $ \conn -> do
+        let missingStr = hoist liftIO $ ChunkCache.values conn
+        flip S.mapM_ missingStr $ \storeID -> do
+           e'present <- liftIO $ hasGarbageChunk repo storeID
+           case e'present of
+               Left err -> do
+                   errorL' $ "Could not determine presence of garbage chunk " <> T.pack (show storeID)
+                       <> " : " <> T.pack (show err)
+               Right True -> do
+                   log' $ "Restoring chunk from garbage: "  <> T.pack (show storeID)
+                   res <- liftIO $ restoreGarbageChunk repo storeID
+                   case res of
+                       Left err -> warn' $ "Could not restore garbage chunk " <> T.pack (show storeID)
+                           <> " : " <> T.pack (show err)
+                       Right () -> return ()
+               Right False -> do
+                   errorL' $ "Chunk is missing from the repository: " <> T.pack (show storeID)
+                       <> " : Please verify the latest backups!"
+  where
+    snapChunks = S.concatMap (collectChunks . snd) $ listSnapshotsPartial repo
     repoChunks = hoist liftResourceT $ listChunks repo
 
-    isGarbage conn storeId = do
-        isMember <- ChunkCache.member conn storeId
-        if isMember
-           then ChunkCache.delete conn storeId >> return False
-           else return True
+-- | Find and collect garbage using the the entire set of snapshots
+-- for the repository. The deleted snapshots parameter is optional, if
+-- it is provided an incremental garbage collection is performed which
+-- considers only the chunks from the deleted snapshots as potential
+-- garbage; otherwise an exhaustive collection is performed.
+-- NOTE: This is a destructive operation!
+collectGarbage
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Repository
+    -> Maybe (Stream' (SnapshotName, Snapshot) m ())
+    -> m ()
+collectGarbage repo deletedSnapshots = do
+   garbageStr <- maybe (findGarbageExhaustive repo)
+                       (findGarbageIncremental repo)
+                       deletedSnapshots
 
-    showChunksReceived = S.mapM_ $ \_ -> do
-        modify (over prChunks succ)
-        gets _prChunks >>= \n ->
-            when (n `mod` 100==0) $ putProgress $ "Chunks received: " ++ (show n)
+   when (isNothing deletedSnapshots) $
+       log' $ "Performing an exhaustive garbage collection."
 
+   garbage S.:> _ <-
+       S.sum . flip S.mapM garbageStr $ \storeID -> do
+           res <- liftIO $ garbageCollectChunk repo storeID
+           case res of
+               Left ex -> do
+                   warn' $ "Could not garbage collect chunk " <> T.pack (show storeID)
+                       <> " : " <> T.pack (show ex)
+                   return 0
+               Right () -> return (1::Integer)
+
+   log' $ "Garbage collected: " <> T.pack (show garbage) <> " chunks."
+
+-- | Delete (expired) garbage.
+-- The expiry time should be set to an interval greater than the longest likely backup time.
+-- This will prevent any possible concurrent backups being affected.
+-- NOTE: This is a destructive operation!
+deleteGarbage
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Repository
+    -> m ()
+deleteGarbage repo = do
+   --- Run chunk repair first as a precaution against any (old, expired) referenced garbage chunks
+   log' $ "Forcing a chunk repair..."
+   chunkRepair repo
+
+   t1  <- asks envStartTime
+   ttl <- asks envGarbageExpiryDays
+
+   log' $ "Finding and deleting expired garbage (expiry is " <> T.pack (show ttl) <> " days)..."
+   deleted S.:> _ <-
+       S.sum . flip S.mapM garbageChunks $ \storeID -> do
+           e't0  <- liftIO $ getGarbageModTime repo storeID
+           case e't0 of
+               Left ex -> do
+                   warn' $ "Could not query modification time of garbage chunk " <> T.pack (show storeID)
+                       <> " : " <> T.pack (show ex)
+                   return 0
+               Right t0 -> do
+                   let diff = fromIntegral $ diffDays (utctDay t1) (utctDay t0)
+                   if (diff >= ttl) -- expiry condition
+                       then do
+                           res <- liftIO $ deleteGarbageChunk repo storeID
+                           case res of
+                               Left ex -> do
+                                   warn' $ "Could not delete garbage chunk " <> T.pack (show storeID)
+                                       <> " : " <> T.pack (show ex)
+                                   return 0
+                               Right () -> return (1::Integer)
+                       else return 0
+
+   log' $ "Garbage deleted: " <> T.pack (show deleted) <> " chunks."
+  where
+   garbageChunks = hoist liftResourceT $ listGarbageChunks repo
+
+-- | Find garbage by considering every chunk in the repository and
+-- using the entire set of snapshots. This /exhaustive collection/ is
+-- expensive and more likely to interfere with concurrent backups,
+-- requiring later repository repairs (newly uploaded chunks
+-- erroneously marked as garbage). An exhaustive collection may be
+-- required if a backup is abandoned before it completes, leaving
+-- unreferenced chunks in the repository.
+findGarbageExhaustive
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Repository
+    -> m (Stream' StoreID m ())
+findGarbageExhaustive repo =
+    chunkDifference repoChunks rootChunks
+  where
+    rootChunks = S.concatMap (collectChunks . snd) $ listSnapshotsPartial repo
+    repoChunks = hoist liftResourceT $ listChunks repo
+
+-- | A non-exhaustive (incremental) collection that considers only
+-- chunks referenced by the supplied deleted snapshots and finds those
+-- that are not in the repository's entire snapshot set.
+findGarbageIncremental
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Repository
+    -> Stream' (SnapshotName, Snapshot) m ()
+    -> m (Stream' StoreID m ())
+findGarbageIncremental repo deletedSnapshots = do
+    chunkDifference deletedChunks rootChunks
+  where
+    rootChunks    = S.concatMap (collectChunks . snd) $ listSnapshotsPartial repo
+    deletedChunks = S.concatMap (collectChunks . snd) deletedSnapshots
+
+-- | Find the difference between two chunk streams using an on-disk chunk cache.
+chunkDifference
+    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+    => Stream' StoreID m ()
+    -> Stream' StoreID m ()
+    -> m (Stream' StoreID m ())
+chunkDifference leftChunks rightChunks = do
+    assertCacheEmpty
+
+    -- Add all left chunks (for consideration) to the cache.
+    -- NOTE: this stream will potentially contain duplicate store IDs,
+    -- which the chunk cache will de-duplicate for us.
+    sinkChunks leftChunks ChunkCache.insert
+
+    -- Remove all chunks referenced by the right chunks from cache.
+    sinkChunks rightChunks ChunkCache.delete
+
+    -- The cache now contains left chunks not referenced in the right chunks.
+    return $ withChunkCache $ hoist liftIO . ChunkCache.values
+
+sinkChunks
+    :: (MonadState Progress m, MonadReader Env m, MonadResource m)
+    => Stream' StoreID m ()
+    -> (ChunkCache.Connection -> StoreID -> IO ())
+    -> m ()
+sinkChunks chunks op = do
+    withChunkCache $ \conn ->
+        S.mapM_ (liftIO . op conn)
+            . showChunksReceived . S.copy
+            $ chunks -- potentially duplicate chunks
+    resetStdErrCursor
+
+showChunksReceived
+    :: (MonadState Progress m, MonadReader Env m, MonadIO m)
+    => Stream' StoreID m r
+    -> m r
+showChunksReceived = S.mapM_ $ \_ -> do
+    modify (over prChunks succ)
+    gets _prChunks >>= \n ->
+        when (n `mod` 100==0) $ putProgress $ "Chunks received: " ++ (show n)
+
+resetStdErrCursor :: MonadIO m => m ()
+resetStdErrCursor = liftIO $ hPutStr stderr "\ESC[K"
+
+-- | Check that the the on-disk chunk cache state is empty, as expected.
+assertCacheEmpty
+  :: (MonadReader Env m, MonadResource m)
+  => m ()
+assertCacheEmpty = do
+    size <- withChunkCache $ liftIO . ChunkCache.size
+    when (size /= 0) $ errorL $ "Assertion failed! Chunk cache is not empty."
 
 ------------------------------------------------------------
 -- Supporting stream transformers and utilities.
@@ -448,7 +673,7 @@ writeFilesCache
   => Stream' (FileItem, ChunkList) m r
   -> Stream' (FileItem, ChunkList) m r
 writeFilesCache str = do
-    cacheFile <- resolveTempFileName "files.tmp"
+    cacheFile <- genFilesCacheName "files.tmp" >>= resolveCacheFileName
     sourceDir <- asks envDirectory
     writeCacheFile cacheFile
         . relativePaths sourceDir
@@ -494,7 +719,7 @@ genFilesCacheName prefix = do
 -- NOTE: We only commit updates to the file cache if the entire backup completes.
 commitFilesCache :: (MonadIO m, MonadCatch m, MonadReader Env m) => m ()
 commitFilesCache = do
-    cacheFile  <- resolveTempFileName' "files.tmp"
+    cacheFile  <- genFilesCacheName "files.tmp" >>= resolveCacheFileName'
     cacheFile' <- genFilesCacheName "files" >>= resolveCacheFileName'
     res <- try $ liftIO $ Dir.renameFile cacheFile cacheFile'
     case res of
@@ -718,20 +943,8 @@ withChunkCache f = do
     release key
     return r
 
-sinkIntoChunkCache
-  :: (MonadReader Env m, MonadResource m)
-  => (ChunkCache.Connection -> a -> IO ())
-  -> Stream' a m r
-  -> m r
-sinkIntoChunkCache f str =
-    withChunkCache $ \conn ->
-        S.mapM_ (liftIO . f conn) str
-
-filterUsingChunkCache
-  :: (MonadReader Env m, MonadResource m)
-  => (ChunkCache.Connection -> a -> IO Bool)
-  -> Stream' a m r
-  -> Stream' a m r
-filterUsingChunkCache f str =
-    withChunkCache $ \conn ->
-        S.filterM (liftIO . f conn) str
+listSnapshotsPartial :: MonadResource m => Repository -> Stream' (SnapshotName, Snapshot) m ()
+listSnapshotsPartial repo =
+    S.map (fmap $ either err id) . hoist liftResourceT $ listSnapshots repo
+  where
+    err ex = errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)

@@ -1,5 +1,5 @@
 Name:            atavachron
-Version:         0.1.2.0
+Version:         0.1.3.0
 Cabal-Version:   >= 1.10
 License:         GPL-3
 License-File:    LICENSE
@@ -78,6 +78,7 @@ Library
                  , Atavachron.Commands
                  , Atavachron.Config
                  , Atavachron.Pipelines
+                 , Atavachron.Prune
                  , Atavachron.Repository
                  , Atavachron.Files
                  , Atavachron.IO
@@ -124,6 +125,7 @@ Executable atavachron
                  , Atavachron.Commands
                  , Atavachron.Config
                  , Atavachron.Pipelines
+                 , Atavachron.Prune
                  , Atavachron.Repository
                  , Atavachron.Files
                  , Atavachron.IO

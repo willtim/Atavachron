@@ -1,6 +1,6 @@
 { mkDerivation, async, attoparsec, aws, base, base16-bytestring
 , binary, bytestring, bzlib, conduit, conduit-extra, containers
-, direct-sqlite, directory, exceptions, expresso, filepath, Glob
+, directory, exceptions, expresso, filepath, Glob
 , hashable, hostname, http-client, http-conduit, http-types, ini
 , lens, logging, lz4, mmorph, mtl, optparse-applicative, parsec
 , QuickCheck, random, resourcet, saltine, scrypt, serialise, stdenv
@@ -16,7 +16,7 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     async attoparsec aws base base16-bytestring binary bytestring bzlib
-    conduit conduit-extra containers direct-sqlite directory exceptions
+    conduit conduit-extra containers directory exceptions
     expresso filepath Glob hashable hostname http-client http-conduit
     http-types ini lens logging lz4 mmorph mtl optparse-applicative
     parsec QuickCheck random resourcet saltine scrypt serialise
@@ -26,7 +26,7 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     async attoparsec aws base base16-bytestring binary bytestring bzlib
-    conduit conduit-extra containers direct-sqlite directory exceptions
+    conduit conduit-extra containers directory exceptions
     expresso filepath Glob hashable hostname http-client http-conduit
     http-types ini lens logging lz4 mmorph mtl optparse-applicative
     parsec QuickCheck random resourcet saltine scrypt serialise

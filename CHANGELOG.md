@@ -1,5 +1,9 @@
 # Change Log
 
+## Version 0.1.3
+
+- Added prune, garbage collection/deletion, chunks check and repair.
+
 ## Version 0.1.2
 
 - Switch from amazonka to aws for S3 support, due to various issues with amazonka.
