@@ -394,9 +394,9 @@ listSnapshots :: URL -> Maybe (Text, Path Abs Dir) -> IO ()
 listSnapshots repoURL source = do
     case source of
         Just (host, path) ->
-            putStrLn $ "Listing snapshots for //" <> T.unpack host <> show path <> "."
+            putStrLn $ "Listing snapshots for //" <> T.unpack host <> show path <> "..."
         Nothing ->
-            putStrLn "Listing all snapshots in the repository."
+            putStrLn "Listing all snapshots in the repository..."
 
     store     <- parseURL'    repoURL
     repo      <- authenticate store
@@ -405,9 +405,9 @@ listSnapshots repoURL source = do
                        source
 
     -- We assume that we can retain the snapshot list in memory and order
-    -- them by date (most recent first).
+    -- them by host, host dir, user and date (most recent first)
     snapshots <- runResourceT
-        . fmap (List.sortOn $ Down . sStartTime . snd)
+        . fmap (List.sortOn $ compareKey . snd)
         . S.toList_
         . S.map (\(key, e'snap) ->
             case e'snap of
@@ -420,6 +420,8 @@ listSnapshots repoURL source = do
        then putStrLn "No snapshots found."
        else flip mapM_ snapshots $ \(key, snap) ->
                 liftIO (printSnapshotRow key snap)
+  where
+    compareKey Snapshot{..} = (sHostName, sHostDir, sUserName, Down sStartTime)
 
 listFiles :: Maybe Config -> URL -> SnapshotName -> FileGlobs -> IO ()
 listFiles mcfg repoURL partialKey globs = do
@@ -565,9 +567,9 @@ runPrune
 runPrune mcfg repo source settings dryRun = do
     case source of
         Just (host, path) ->
-            putStrLn $ prefix <> "Pruning snapshots for //" <> T.unpack host <> show path <> "."
+            putStrLn $ prefix <> "Pruning snapshots for //" <> T.unpack host <> show path <> "..."
         Nothing ->
-            putStrLn $ prefix <> "Pruning all snapshots in the repository."
+            putStrLn $ prefix <> "Pruning all snapshots in the repository..."
 
     env <- makeEnv mcfg repo rootDir noFileGlobs
     let stream = maybe (Repository.listSnapshots repo)
