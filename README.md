@@ -60,6 +60,8 @@ Verification is similar to a restore. It will download all chunks from a reposit
 
     $ atavachron verify 107 -r file:///home/tim/test-repo
 
+A much faster but obviously less thorough test, is to simply check the existence of all referenced chunks in the storage. This can be accomplished using the `chunks --check` command.
+
 ### Add an additional access key
 
 To create an additional access key with its own password, use the following:
@@ -86,6 +88,10 @@ To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a region
 
 A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Ideally, AWS credentials should be provided in an INI-file located at `~/.aws/credentials`, currently it is only the default profile that is used. The format of this file is documented [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html). Alternatively, the environment variables
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` can be used, these are documented [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html).
+
+### Getting help
+
+A list of the available commands can be obtained by using the `--help` switch. The usage for a particular command can be obtained by invoking the command without any switches.
 
 ## Repository structure
 
