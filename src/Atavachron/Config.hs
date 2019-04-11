@@ -54,10 +54,10 @@ schema =
              , source   : Text
              , pruning  : < Disabled : {}
                           , Enabled  :
-                            { keep_daily   : Maybe Int
-                            , keep_weekly  : Maybe Int
-                            , keep_monthly : Maybe Int
-                            , keep_yearly  : Maybe Int
+                            { keepDaily   : Maybe Int
+                            , keepWeekly  : Maybe Int
+                            , keepMonthly : Maybe Int
+                            , keepYearly  : Maybe Int
                             }
                           >
              }
@@ -248,16 +248,16 @@ instance HasValue Profile where
 
 instance HasValue PruneSettings where
     proj v = PruneSettings
-        <$> v .: "keep_daily"
-        <*> v .: "keep_weekly"
-        <*> v .: "keep_monthly"
-        <*> v .: "keep_yearly"
+        <$> v .: "keepDaily"
+        <*> v .: "keepWeekly"
+        <*> v .: "keepMonthly"
+        <*> v .: "keepYearly"
 
     inj PruneSettings{..} = mkRecord
-        [ "keep_daily"   .= inj keepDaily
-        , "keep_weekly"  .= inj keepWeekly
-        , "keep_monthly" .= inj keepMonthly
-        , "keep_yearly"  .= inj keepYearly
+        [ "keepDaily"   .= inj keepDaily
+        , "keepWeekly"  .= inj keepWeekly
+        , "keepMonthly" .= inj keepMonthly
+        , "keepYearly"  .= inj keepYearly
         ]
 
 instance HasValue URL where
