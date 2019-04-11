@@ -187,6 +187,10 @@ Property-based tests consist of assertions and logical properties that a functio
 
 This isn't currently planned. However, I do intend to test it under the Windows 10 Subsystem for Linux (WSL).
 
+### How can I contribute?
+
+Contributions are welcome in any form: bug fixes, new features, issues, testing and performance tuning. An easy way to contribute new features would be to add support for a new type of storage backend (e.g. SFTP or a cloud provider other than Amazon). The store interface should be relatively simple to implement and can be seen in the source file [Store.hs](https://github.com/willtim/Atavachron/blob/master/src/Atavachron/Store.hs).
+
 ### Where does the name come from?
 
 The Atavachron was the time machine that Kirk, Spock and McCoy unwittingly used in the Star Trek episode "All our Yesterdays". Atavachron is also a really good 80's jazz fusion album by the late great guitarist Allan Holdsworth.
