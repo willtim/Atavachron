@@ -89,6 +89,14 @@ To backup to Amazon S3, we provide a URL using an S3 protocol prefix to a region
 A list of all the Amazon regional endpoints can be found [here](https://docs.aws.amazon.com/general/latest/gr/rande.html). Ideally, AWS credentials should be provided in an INI-file located at `~/.aws/credentials`, currently it is only the default profile that is used. The format of this file is documented [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html). Alternatively, the environment variables
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` can be used, these are documented [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html).
 
+### Glob filter patterns
+
+For both backup and restore, include and exclude glob patterns can be specified to restrict the set of files. The glob patterns must be relative paths and are therefore not expected to start with a leading forward slash. If multiple patterns are specified, the composition follows the following logical formula:
+
+    (include₁ ∨ ... ∨ includeₙ) ∧ ¬(exclude₁ ∨ ... ∨ excludeₙ)
+
+The glob pattern matching is provided by the Hackage /Glob/ package. A detailed description of the glob pattern syntax can be found [here](https://hackage.haskell.org/package/Glob-0.10.0/docs/System-FilePath-Glob.html#v:compile).
+
 ### Getting help
 
 A list of the available commands can be obtained by using the `--help` switch. The usage for a particular command can be obtained by invoking the command without any switches.

@@ -753,7 +753,8 @@ parseGlob :: Text -> FilePredicate
 parseGlob g = FilePredicate $ \path ->
         match patt <$> getFilePath path
   where
-    patt = simplify $ compile $ T.unpack g
+    patt | "/" `T.isPrefixOf` g = errorL' $ "File path glob pattern must be relative not absolute: " <> g
+         | otherwise = simplify $ compile $ T.unpack g
 
 -- TODO move URL parsing logic to each individual store?
 parseURL :: URL -> IO (Either Text Store)
