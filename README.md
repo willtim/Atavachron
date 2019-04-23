@@ -76,7 +76,7 @@ Prune will delete snapshots using a supplied retention policy. For example:
 
     $ atavachron prune -r file:///home/tim/test-repo --keep-daily 5 --keep-monthly 3
 
-Note that it is distinct backups that count, e.g. keep 5 days means the last 5 recent distinct days. Snapshots selected by previous rules are not considered by later rules. Pruning for the current host and a particular source folder can achieved by specifying the source folder.
+Note that it is distinct backups that count, e.g. keep 5 days means the last 5 recent distinct days. Snapshots selected by previous rules are not considered by later rules. Pruning for the current host and a particular source folder can be achieved by specifying the source folder.
 
 Prune will result in some chunks being marked as *garbage*. These are only ever deleted by issuing a `chunks --delete-garbage` command provided that the configured garbage expiry time has been exceeded for each garbage chunk considered. The expiry time defaults to 30 days and is intended to reflect the maximum possible backup time. This optimistic concurrency scheme permits concurrent backups during a prune. Concurrent prunes may generate warnings (a snapshot already deleted, or a chunk already collected as garbage).
 

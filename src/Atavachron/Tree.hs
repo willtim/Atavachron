@@ -171,11 +171,8 @@ enumDir dir = do
                   yield $ RawItem DirK name fs
               nextName
           | Files.isSymbolicLink stat = do
-              isRead <- liftIO $ Files.fileAccess path True False False
               target <- liftIO $ Files.readSymbolicLink path
-              when isRead $ do
-                  fs <- liftIO $ Files.getFileStatus path
-                  yield $ RawItem (LinkK target) name fs
+              yield $ RawItem (LinkK target) name stat
               nextName
           | otherwise = nextName
 
