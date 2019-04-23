@@ -458,8 +458,8 @@ addAccessKey repoURL name = do
     repo  <- authenticate store
     T.putStrLn "Please provide the additional credentials."
     pass  <- newPassword
-    cc    <- Repository.newAccessKey (repoStore repo) (repoManifestKey repo) name pass
-    saveCredentials (urlText repoURL) cc
+    void $ Repository.newAccessKey (repoStore repo) (repoManifestKey repo) name pass
+    T.putStrLn "Access key created."
 
 runBackup :: Maybe Config -> Repository -> Path Abs Dir -> FileGlobs -> Bool -> IO ()
 runBackup mcfg repo sourceDir globs forceFullScan' = do
