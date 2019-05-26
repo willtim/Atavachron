@@ -8,7 +8,6 @@
 module Atavachron.IO where
 
 import Control.Concurrent (threadDelay)
-import Control.Logging
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
@@ -34,6 +33,7 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (plusPtr)
 import Foreign.C.Error
 
+import Atavachron.Logging
 import Atavachron.Streaming
 
 -- | This uses POSIX read.
@@ -100,7 +100,7 @@ retryWithExponentialBackoff retries m
                     r <- randomRIO (1 :: Double, 1 + randomisation)
                     let interval = r * initTimeout * multiplier ^ n -- seconds
 
-                    warn' $ T.pack (show ex) <> ". Retrying..."
+                    logWarn $ T.pack (show ex) <> ". Retrying..."
 
                     delay (floor $ interval * 1e6) -- argument is microseconds
                     loop (n - 1)

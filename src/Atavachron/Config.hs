@@ -22,7 +22,6 @@ module Atavachron.Config (
     , writeDefaultConfigFile
     ) where
 
-import Control.Logging
 import Control.Monad (when)
 import Control.Monad.Except (ExceptT(..), runExceptT)
 import Expresso
@@ -35,6 +34,7 @@ import System.Info
 import System.Directory
 import System.FilePath
 
+import Atavachron.Logging
 
 -- | Schema for Atavachron configuration files.
 schema :: Type
@@ -127,7 +127,7 @@ tryLoadingConfigFile :: Maybe FilePath -> IO (Maybe Config)
 tryLoadingConfigFile (Just explicitFilePath) = do
     exists <- doesFileExist explicitFilePath
     when (not exists) $
-        errorL' $ "Cannot find configuration file at supplied location: "
+        panic $ "Cannot find configuration file at supplied location: "
                 <> T.pack explicitFilePath
     Just <$> loadConfig explicitFilePath
 tryLoadingConfigFile Nothing = do
@@ -144,19 +144,19 @@ writeDefaultConfigFile mfp = do
     filePath <- maybe getDefaultConfigFilePath return mfp
     exists   <- doesFileExist filePath
     when exists $
-        errorL' $ "Configuration file already exists at supplied location: "
+        panic $ "Configuration file already exists at supplied location: "
                 <> T.pack filePath
     str <- showValue' $ inj emptyConfig
     writeFile filePath str
-    log' $ "Wrote empty configuration file: " <> T.pack filePath
+    logInfo $ "Wrote empty configuration file: " <> T.pack filePath
 
 loadConfig :: FilePath -> IO Config
 loadConfig filePath = do
     res <- loadConfig' filePath
     case res of
-        Left err  -> errorL' $ "Could not load configuration file: " <> T.pack err
+        Left err  -> panic $ "Could not load configuration file: " <> T.pack err
         Right cfg -> do
-            log' $ "Loaded configuration file: " <> T.pack filePath
+            logInfo $ "Loaded configuration file: " <> T.pack filePath
             return cfg
 
 loadConfig' :: FilePath -> IO (Either String Config)

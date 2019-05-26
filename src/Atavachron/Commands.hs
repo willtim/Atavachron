@@ -24,7 +24,6 @@ import Prelude hiding (concatMap)
 import Codec.Serialise
 
 import Control.Exception
-import Control.Logging
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Reader
@@ -58,6 +57,7 @@ import qualified System.Posix.Files as Files
 import Atavachron.Chunk.Encode (hexEncode)
 import Atavachron.Config
 import Atavachron.Env
+import Atavachron.Logging
 import Atavachron.Path
 import Atavachron.Pipelines
 import Atavachron.Repository ( Repository(..), Snapshot(..)
@@ -249,7 +249,7 @@ initialise InitOptions{..} _ = do
     cc    <- Repository.initRepository store pass
     let url = urlText repoURL
     saveCredentials url cc
-    log' $ "Repository created at " <> url
+    logInfo $ "Repository created at " <> url
 initialise InitOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     initialise (InitOptions{repoURL = profileLocation p}) mcfg
@@ -356,13 +356,13 @@ prune PruneOptions{..} mcfg = do
     ms <- maybe (return Nothing) (fmap Just . parseSource) sourceDir
     case settings of
         PruneSettings Nothing Nothing Nothing Nothing | isNothing ms ->
-            errorL' $ "Refusing to prune all snapshots for the entire repository. "
+            panic $ "Refusing to prune all snapshots for the entire repository. "
                 <> "See \"prune help\" for additional settings."
         _ -> runPrune mcfg repo ms settings dryRun
 prune PruneOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     case profilePruning p of
-        Disabled -> errorL' $ "Pruning disabled for profile: " <> profileName
+        Disabled -> panic $ "Pruning disabled for profile: " <> profileName
         Enabled settings -> prune (PruneOptions{repoURL = profileLocation p
                                                ,sourceDir = Just (profileSource p)
                                                ,settings
@@ -412,7 +412,7 @@ listSnapshots repoURL source = do
         . S.map (\(key, e'snap) ->
             case e'snap of
                 Left ex    ->
-                    errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)
+                    panic $ "Failed to fetch snapshot: " <> T.pack (show ex)
                 Right snap -> (key, snap))
         $ stream
 
@@ -472,7 +472,7 @@ runBackup mcfg repo sourceDir globs forceFullScan' = do
             Just key | not forceFullScan' -> do
                 haveLastSnap <- Repository.doesSnapshotExist repo key
                 when (not haveLastSnap) $
-                    warn' $ "Could not find previous snapshot '" <> key <> "', forcing full scan."
+                    logWarn $ "Could not find previous snapshot '" <> key <> "', forcing full scan."
                 return $ not haveLastSnap
             Nothing  | not forceFullScan' -> return True -- full scan if no previous key
             _ -> return True
@@ -485,14 +485,13 @@ runBackup mcfg repo sourceDir globs forceFullScan' = do
 
     res <- Repository.putSnapshot repo snapshot
     case res of
-        Left ex   -> errorL' $ "Failed to write snapshot: " <> T.pack (show ex)
+        Left ex   -> panic $ "Failed to write snapshot: " <> T.pack (show ex)
         Right key -> do
-            -- print a newline to always leave the last stderr progress line visible at the end
-            liftIO $ IO.hPutStr IO.stderr "\n"
-            log' $ "Wrote snapshot " <> T.take 8 key
+            retainProgress
+            logInfo $ "Wrote snapshot " <> T.take 8 key
             flip runReaderT env $
                 commitFilesCache >> writeLastSnapshotKey key >> cleanUpTempFiles
-    log' "Backup complete."
+    logInfo "Backup complete."
 
 
 runVerify :: Maybe Config -> Repository -> Snapshot -> FileGlobs -> IO ()
@@ -503,14 +502,13 @@ runVerify mcfg repo snapshot globs = do
         . flip runReaderT env
         . S.mapM_ logFailed -- for now, just log files with errors
         $ verifyPipeline snapshot
-    -- print a newline to always leave the last stderr progress line visible at the end
-    liftIO $ IO.hPutStr IO.stderr "\n"
-    log' "Verification complete."
+    retainProgress
+    logInfo "Verification complete."
   where
     logFailed (item, VerifyResult errors) =
         unless (null errors) $ do
             path <- liftIO $ getFilePath (filePath item)
-            warn' $ "File has errors: " <> (T.pack path)
+            logWarn $ "File has errors: " <> (T.pack path)
 
 runRestore :: Maybe Config -> Repository -> Snapshot -> Path Abs Dir -> FileGlobs -> IO ()
 runRestore mcfg repo snapshot targetDir globs = do
@@ -519,29 +517,28 @@ runRestore mcfg repo snapshot targetDir globs = do
         . flip evalStateT initialProgress
         . flip runReaderT env
         $ restoreFiles snapshot
-    -- print a newline to always leave the last stderr progress line visible at the end
-    liftIO $ IO.hPutStr IO.stderr "\n"
-    log' "Restore complete."
+    retainProgress
+    logInfo "Restore complete."
 
 runCheckChunks :: Maybe Config -> URL -> IO ()
 runCheckChunks mcfg repoURL = do
     runChunksProc mcfg repoURL chunkCheck
-    log' "Chunks check complete."
+    logInfo "Chunks check complete."
 
 runRepairChunks :: Maybe Config -> URL -> IO ()
 runRepairChunks mcfg repoURL = do
     runChunksProc mcfg repoURL chunkRepair
-    log' "Chunks repair complete."
+    logInfo "Chunks repair complete."
 
 runExhaustiveGC :: Maybe Config -> URL -> IO ()
 runExhaustiveGC mcfg repoURL = do
     runChunksProc mcfg repoURL $ \repo -> collectGarbage repo Nothing
-    log' "Exhaustive GC complete."
+    logInfo "Exhaustive GC complete."
 
 runDeleteGarbage :: Maybe Config -> URL -> IO ()
 runDeleteGarbage mcfg repoURL = do
     runChunksProc mcfg repoURL deleteGarbage
-    log' "Garbage deletion complete."
+    logInfo "Garbage deletion complete."
 
 runChunksProc
   :: Maybe Config
@@ -580,7 +577,7 @@ runPrune mcfg repo source settings dryRun = do
         . S.map (\(key, e'snap) ->
             case e'snap of
                 Left ex    ->
-                    errorL' $ "Failed to fetch snapshot: " <> T.pack (show ex)
+                    panic $ "Failed to fetch snapshot: " <> T.pack (show ex)
                 Right snap -> (key, snap))
         $ stream
 
@@ -596,7 +593,7 @@ runPrune mcfg repo source settings dryRun = do
         forM_ (Map.elems deletions) $ \snapshot -> do
             e <- Repository.deleteSnapshot repo snapshot
             case e of
-                Left ex  -> warn' $ "Could not delete snapshot " <> T.pack (show snapshot)
+                Left ex  -> logWarn $ "Could not delete snapshot " <> T.pack (show snapshot)
                                 <> " : " <> T.pack (show ex)
                 Right () -> return ()
 
@@ -607,7 +604,7 @@ runPrune mcfg repo source settings dryRun = do
             $ collectGarbage repo (Just . toStream $ deletions)
                 >> cleanUpTempFiles
 
-        log' "Pruning complete."
+        logInfo "Pruning complete."
 
   where
     prefix | dryRun    = "DRY RUN: "
@@ -635,7 +632,7 @@ loadCredentials urlText = do
     filePath  <- mkCacheFileName cachePath urlText "credentials" >>= getFilePath
     exists    <- Files.fileExist filePath
     if exists
-        then do debug' $ "Using cached credentials."
+        then do logDebug $ "Using cached credentials."
                 Just . deserialise <$> LB.readFile filePath
         else    return Nothing
 
@@ -649,7 +646,7 @@ saveCredentials urlText cc = do
 
 makeEnv :: Maybe Config -> Repository -> Path Abs Dir -> FileGlobs -> IO Env
 makeEnv mcfg repo localDir globs = do
-    debug' $ "Available cores: " <> T.pack (show numCapabilities)
+    logDebug $ "Available cores: " <> T.pack (show numCapabilities)
     startT      <- getCurrentTime
 
     -- default to a conservative size to minimise memory usage.
@@ -689,7 +686,7 @@ makeEnv mcfg repo localDir globs = do
 -- | For now, default to XDG standard
 getCachePath :: IO (Path Abs Dir)
 getCachePath =
-    fromMaybe (errorL' "Cannot parse XDG directory") . parseAbsDir
+    fromMaybe (panic "Cannot parse XDG directory") . parseAbsDir
         <$> Dir.getXdgDirectory Dir.XdgCache "atavachron"
 
 -- | Parses the source path and augments it with the current hostname.
@@ -702,7 +699,7 @@ parseSource sourceDir = (,)
 parseAbsDir' :: Text -> IO (Path Abs Dir)
 parseAbsDir' t =
     case parseAbsDir (T.unpack t) of
-        Nothing   -> errorL' $ "Cannot parse absolute path: " <> t
+        Nothing   -> panic $ "Cannot parse absolute path: " <> t
         Just path -> return path
 
 -- | Return a temporary directory inside the appropriate place which
@@ -711,12 +708,12 @@ getTempDir :: IO (Path Abs Dir)
 getTempDir = do
     fp  <- Dir.getTemporaryDirectory
     case parseAbsDir fp of
-        Nothing   -> errorL' $ "Cannot parse system-provided temporary path: " <> (T.pack fp)
+        Nothing   -> panic $ "Cannot parse system-provided temporary path: " <> (T.pack fp)
         Just path -> do
             pid <- T.encodeUtf8 . T.pack . show <$> getProcessID
             let tmpDir = foldl pushDir path [T.encodeUtf8 "atavachron", pid]
             fp  <- getFilePath tmpDir
-            debug' $ "Using temporary directory: " <> T.pack fp
+            logDebug $ "Using temporary directory: " <> T.pack fp
             return tmpDir
 
 -- | Logs and throws, if it cannot retrieve the snapshot
@@ -724,7 +721,7 @@ getSnapshot :: Repository -> Text -> IO Snapshot
 getSnapshot repo partialKey = do
     e'snap <- Repository.getSnapshot repo partialKey
     case e'snap of
-        Left ex    -> errorL' $ "Could not retrieve snapshot: " <> T.pack (show ex)
+        Left ex    -> panic $ "Could not retrieve snapshot: " <> T.pack (show ex)
         Right snap -> return snap
 
 -- | Print a snapshot to stdout as a fixed-width row.
@@ -753,7 +750,7 @@ parseGlob :: Text -> FilePredicate
 parseGlob g = FilePredicate $ \path ->
         match patt <$> getFilePath path
   where
-    patt | "/" `T.isPrefixOf` g = errorL' $ "File path glob pattern must be relative not absolute: " <> g
+    patt | "/" `T.isPrefixOf` g = panic $ "File path glob pattern must be relative not absolute: " <> g
          | otherwise = simplify $ compile $ T.unpack g
 
 -- TODO move URL parsing logic to each individual store?
@@ -776,7 +773,7 @@ parseURL URL{..} =
 -- a version that blows up
 parseURL' :: URL -> IO Store
 parseURL' repoURL =
-    either (errorL' . ("Cannot parse URL: "<>)) id <$> parseURL repoURL
+    either (panic . ("Cannot parse URL: "<>)) id <$> parseURL repoURL
 
 newPassword :: IO Text
 newPassword = do
@@ -802,10 +799,10 @@ getPassword = do
 getProfile :: Text -> Maybe Config -> IO Profile
 getProfile name mcfg
     | Just profile <- mcfg >>= findProfileByName name = do
-          log' $ "Using profile: " <> name
+          logInfo $ "Using profile: " <> name
           return profile
     | otherwise =
-          errorL' $ "Cannot find profile: " <> name
+          panic $ "Cannot find profile: " <> name
 
 addGlobsFromProfile :: Profile -> FileGlobs -> FileGlobs
 addGlobsFromProfile Profile{..} (FileGlobs inc exc) =

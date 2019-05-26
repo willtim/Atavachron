@@ -1,6 +1,5 @@
 module Main where
 
-import Control.Logging
 import qualified Crypto.Saltine as Saltine
 
 import Data.Semigroup ((<>))
@@ -12,6 +11,7 @@ import Data.Version (showVersion)
 
 import Atavachron.Commands
 import Atavachron.Config (URL(..), PruneSettings(..))
+import Atavachron.Logging
 
 data Options = Options
   { optCommand    :: Command

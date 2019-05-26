@@ -15,7 +15,6 @@ module Atavachron.Store.S3
     ) where
 
 import           Control.Arrow
-import           Control.Logging
 import           Control.Monad.Catch
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
@@ -45,6 +44,7 @@ import           System.FilePath
 import           Streaming (Stream, Of(..))
 import qualified Streaming.Prelude       as S
 
+import           Atavachron.Logging
 import           Atavachron.Store (Store(..))
 import qualified Atavachron.Store as Store
 
@@ -247,7 +247,7 @@ loadCredentialsFromAwsConfig file profile = do
     res <- INI.readIniFile file
     case res >>= extract of
         Left err ->
-            errorL $ "Could not parse aws credentials ini file: " <> T.pack err
+            panic $ "Could not parse aws credentials ini file: " <> T.pack err
         Right (keyID, secret) ->
             Aws.makeCredentials (T.encodeUtf8 keyID) (T.encodeUtf8 secret)
   where

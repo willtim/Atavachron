@@ -22,7 +22,6 @@ import Prelude hiding (concatMap)
 import Codec.Serialise
 
 import Control.Lens (over)
-import Control.Logging
 import Control.Monad
 import Control.Monad.Morph (hoist)
 import Control.Monad.Reader
@@ -43,6 +42,7 @@ import qualified System.Posix.Directory.ByteString as Dir
 import System.Posix.Types
 
 import Atavachron.Env
+import Atavachron.Logging
 import Atavachron.Path
 import Atavachron.Chunk.Builder
 import Atavachron.Tree
@@ -119,11 +119,11 @@ saveFiles str = do
                     DirItem FileMeta{..} -> liftIO $ do
                         Dir.createDirectory (getRawFilePath filePath) fileMode
                         fp <- getFilePath filePath
-                        debug' $ "Wrote directory '" <> T.pack fp <> "'"
+                        logDebug $ "Wrote directory '" <> T.pack fp <> "'"
                     LinkItem FileMeta{..} target -> liftIO $ do
                         Files.createSymbolicLink target (getRawFilePath filePath)
                         fp <- getFilePath filePath
-                        debug' $ "Wrote symbolic link '" <> T.pack fp <> "'"
+                        logDebug $ "Wrote symbolic link '" <> T.pack fp <> "'"
                 return Nothing
 
     doFileChunk file bs = \case
@@ -144,7 +144,7 @@ saveFiles str = do
         liftIO $ Files.setFdTimesHiRes    hFd (fileATime hFile) (fileMTime hFile)
         release hKey
         fp <- liftIO $ getFilePath $ filePath hFile
-        debug' $ "Wrote file '" <> T.pack fp <> "'"
+        logDebug $ "Wrote file '" <> T.pack fp <> "'"
 
 
 
@@ -163,7 +163,7 @@ readFiles = S.concatMap $ \file -> do
         let !rfp = getRawFilePath filePath
 
         fp <- liftIO $ getFilePath filePath
-        debug' $ "Reading file '" <> T.pack fp <> "'"
+        logDebug $ "Reading file '" <> T.pack fp <> "'"
 
         (key, fd) <- allocate (IO.openFd rfp IO.ReadOnly (Just Files.stdFileMode) IO.defaultFileFlags)
                               (IO.closeFd)

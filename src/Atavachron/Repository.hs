@@ -54,7 +54,6 @@ import Codec.Serialise.Encoding
 import qualified Codec.Compression.BZip as BZip
 
 import Control.Exception
-import Control.Logging
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
@@ -84,6 +83,7 @@ import GHC.Generics (Generic)
 
 import Atavachron.Chunk.CDC
 import Atavachron.Chunk.Encode
+import Atavachron.Logging
 import Atavachron.Path
 import Atavachron.Streaming (Stream')
 import Atavachron.Store (Store, Key)
@@ -372,7 +372,7 @@ getSnapshot repo partialKey = do
 -- | Retrieve a snapshot by its fully-specified key.
 getSnapshotByKey :: Repository -> Key -> IO (Either SomeException Snapshot)
 getSnapshotByKey repo key = do
-    debug' $ "Loading snapshot with key: " <> Store.kName key
+    logDebug $ "Loading snapshot with key: " <> Store.kName key
     let Manifest{..} = repoManifest repo
     e'blob <- try (Store.get (repoStore repo) key)
     return $ e'blob >>= decrypt (unChunkKey mChunkKey)
@@ -394,7 +394,7 @@ putSnapshot :: Repository -> Snapshot -> IO (Either SomeException SnapshotName)
 putSnapshot Repository{..} snapshot = do
     let (key, pickled) = computeSnapshotKey repoManifest snapshot
 
-    debug' $ "Writing snapshot with key: " <> Store.kName key
+    logDebug $ "Writing snapshot with key: " <> Store.kName key
 
     res <- encryptBytes (unChunkKey $ mChunkKey repoManifest) pickled
                >>= try . Store.put repoStore key . serialise
@@ -406,7 +406,7 @@ putSnapshot Repository{..} snapshot = do
 deleteSnapshot :: Repository -> Snapshot -> IO (Either SomeException ())
 deleteSnapshot Repository{..} snapshot = do
     let key = fst $ computeSnapshotKey repoManifest snapshot
-    debug' $ "Deleting snapshot: " <> Store.kName key
+    logDebug $ "Deleting snapshot: " <> Store.kName key
     try (Store.delete repoStore key)
 
 -- | Does the supplied storeID exist in the garbage folder?
@@ -434,14 +434,14 @@ garbageCollectChunk :: Repository -> StoreID -> IO (Either SomeException ())
 garbageCollectChunk Repository{..} storeID = do
     let srcKey  = mkChunkKey chunksPath  storeID
         destKey = mkChunkKey garbagePath storeID
-    debug' $ "Moving to garbage: " <> Store.kName srcKey
+    logDebug $ "Moving to garbage: " <> Store.kName srcKey
     try (Store.move repoStore srcKey destKey)
 
 -- | Permanently delete the garbage chunk from the repository (!)
 deleteGarbageChunk :: Repository -> StoreID -> IO (Either SomeException ())
 deleteGarbageChunk Repository{..} storeID = do
     let key  = mkChunkKey garbagePath storeID
-    debug' $ "Deleting garbage chunk: " <> Store.kName key
+    logDebug $ "Deleting garbage chunk: " <> Store.kName key
     try (Store.delete repoStore key)
 
 -- | Compute the key for a snapshot using its contents.
@@ -458,13 +458,13 @@ computeSnapshotKey Manifest{..} snapshot = (key, pickled)
 putProgramBinary :: Repository -> IO (Either SomeException StoreID)
 putProgramBinary repo = do
     programPath <- getExecutablePath
-    debug' $ "Storing executable " <> T.pack programPath
+    logDebug $ "Storing executable " <> T.pack programPath
     binary      <- BZip.compress <$> LB.readFile programPath
     let Manifest{..} = repoManifest repo
         storeID  = hashBytes mStoreIDKey (LB.toStrict binary)
         key      = Store.Key binariesPath $ hexEncode storeID
 
-    debug' $ "Writing Atavachron binary with key: " <> Store.kName key
+    logDebug $ "Writing Atavachron binary with key: " <> Store.kName key
     res <- try (Store.put (repoStore repo) key binary)
     return $ const storeID <$> res
 
@@ -473,14 +473,14 @@ initRepository :: Store -> Text -> IO CachedCredentials
 initRepository store pass = do
     hasManifest <- Store.hasKey store manifestStoreKey
     when hasManifest $
-        errorL' "URL already hosts a repository"
+        panic "URL already hosts a repository"
 
     manifest    <- newManifest
     manifestKey <- ManifestKey <$> SecretBox.newKey
 
     let pickled = LB.toStrict $ serialise manifest
 
-    either (\(ex :: SomeException) -> errorL' $ "Failed to initialise repository: " <> T.pack (show ex)) id
+    either (\(ex :: SomeException) -> panic $ "Failed to initialise repository: " <> T.pack (show ex)) id
         <$> (encryptBytes (unManifestKey manifestKey) pickled
                >>= try . Store.put store manifestStoreKey . serialise)
     newAccessKey store manifestKey "default" pass
@@ -491,7 +491,7 @@ newAccessKey store manifestKey name pass = do
     salt <- Scrypt.newSalt
     let key  = keyFromPassword salt pass
     ciphertext <- encryptBytes key (Saltine.encode $ unManifestKey manifestKey)
-    either (\(ex :: SomeException) -> errorL' $ "Could not write access key: " <> T.pack (show ex)) id
+    either (\(ex :: SomeException) -> panic $ "Could not write access key: " <> T.pack (show ex)) id
         <$> putAccessKey store name (AccessKey salt ciphertext)
     return $ CachedCredentials key name
 
@@ -500,11 +500,11 @@ authenticate :: Store -> Text -> IO (Repository, CachedCredentials)
 authenticate store pass = do
     hasManifest <- Store.hasKey store manifestStoreKey
     unless hasManifest $
-        errorL' $ "Could not find a repository at the supplied URL"
+        panic $ "Could not find a repository at the supplied URL"
 
     -- for now, just try each key in succession
     let keyStr = listAccessKeys store
-    (manifestKey, cc) <- fromMaybe (errorL' "Password does not match any stored!")
+    (manifestKey, cc) <- fromMaybe (panic "Password does not match any stored!")
                <$> runResourceT (S.foldM_ tryPass (return Nothing) return keyStr)
     (,cc) <$> resolveRepository store manifestKey
 
@@ -514,10 +514,10 @@ authenticate store pass = do
         -> (AccessKeyName, Either SomeException AccessKey)
         -> (ResourceT IO) (Maybe (ManifestKey, CachedCredentials))
     tryPass Nothing (name, Left ex) = do
-        warn' $ "Could not retrieve key '" <> name <> "' : " <> T.pack (show ex)
+        logWarn $ "Could not retrieve key '" <> name <> "' : " <> T.pack (show ex)
         return Nothing
     tryPass Nothing (name, Right AccessKey{..}) = do
-        debug' $ "Trying key: " <> name
+        logDebug $ "Trying key: " <> name
         let key = keyFromPassword akSalt pass
             cc  = CachedCredentials key name
         return $ (,cc) . ManifestKey
@@ -529,13 +529,13 @@ authenticate' :: Store -> CachedCredentials -> IO Repository
 authenticate' store CachedCredentials{..} = do
     hasManifest <- Store.hasKey store manifestStoreKey
     unless hasManifest $
-        errorL' $ "Could not find a repository at the supplied URL"
+        panic $ "Could not find a repository at the supplied URL"
 
     res      <- getAccessKey store ccAccessKeyName
     case res of
-        Left ex -> errorL $ "Could not retrieve access key: " <> T.pack (show ex)
+        Left ex -> panic $ "Could not retrieve access key: " <> T.pack (show ex)
         Right AccessKey{..} -> do
-            let manifestKey = maybe (errorL $ "Cached credentials do not match access key: " <> ccAccessKeyName)
+            let manifestKey = maybe (panic $ "Cached credentials do not match access key: " <> ccAccessKeyName)
                                     ManifestKey
                             $ (decryptBytes ccPasswordHash akManifestKey >>= Saltine.decode)
             resolveRepository store manifestKey
@@ -543,7 +543,7 @@ authenticate' store CachedCredentials{..} = do
 -- Loads and decodes the Manifest
 resolveRepository :: Store -> ManifestKey -> IO Repository
 resolveRepository store manifestKey = do
-    manifest <- either (\ex -> errorL' $ "Cannot obtain manifest: " <> T.pack (show ex)) id
+    manifest <- either (\ex -> panic $ "Cannot obtain manifest: " <> T.pack (show ex)) id
                      . (>>= decrypt (unManifestKey manifestKey) (toException ManifestDecryptFailed))
                    <$> try (Store.get store manifestStoreKey)
     return Repository
@@ -556,10 +556,10 @@ resolveRepository store manifestKey = do
 keyFromPassword :: Scrypt.Salt -> Text -> SecretBox.Key
 keyFromPassword salt pass = key
   where
-    key    = fromMaybe (errorL' "Failed to generate secret key from password hash")
+    key    = fromMaybe (panic "Failed to generate secret key from password hash")
            $ Saltine.decode $ Scrypt.getHash hash
     hash   = Scrypt.scrypt params salt (Scrypt.Pass $ encodeUtf8 pass)
-    params = fromMaybe (errorL' "Failed to generate Scrypt parameters")
+    params = fromMaybe (panic "Failed to generate Scrypt parameters")
            $ Scrypt.scryptParamsLen 14 8 1 (fromIntegral $ ByteSizes.secretBoxKey)
 
 
