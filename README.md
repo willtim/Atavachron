@@ -11,7 +11,7 @@
 - Property-based testing of core processing pipeline
 - Amazon S3 support
 
-*WARNING: Currently under active development and not yet ready for widespread use*
+*WARNING: currently alpha status with limited widespread testing*
 
 ## Quick start
 
