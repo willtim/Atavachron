@@ -79,6 +79,7 @@ Library
                  , Atavachron.Commands
                  , Atavachron.Config
                  , Atavachron.Pipelines
+                 , Atavachron.Garbage
                  , Atavachron.Prune
                  , Atavachron.Repository
                  , Atavachron.Files
@@ -127,6 +128,7 @@ Executable atavachron
                  , Atavachron.Commands
                  , Atavachron.Config
                  , Atavachron.Pipelines
+                 , Atavachron.Garbage
                  , Atavachron.Prune
                  , Atavachron.Repository
                  , Atavachron.Files

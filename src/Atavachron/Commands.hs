@@ -60,6 +60,7 @@ import Atavachron.Env
 import Atavachron.Logging
 import Atavachron.Path
 import Atavachron.Pipelines
+import Atavachron.Garbage
 import Atavachron.Repository ( Repository(..), Snapshot(..)
                              , SnapshotName, CachedCredentials)
 import Atavachron.Store (Store)
