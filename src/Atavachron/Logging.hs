@@ -21,6 +21,7 @@ module Atavachron.Logging (
   , LogLevel(..)
   ) where
 
+import Control.Concurrent
 import Control.Monad
 import Control.Monad.IO.Class
 import Data.IORef
@@ -48,6 +49,10 @@ loggerSet :: IORef LoggerSet
 {-# NOINLINE loggerSet #-}
 loggerSet = unsafePerformIO $
     newIORef (error "Logging must reside inside withStdoutLogging or withFileLogging")
+
+stderrLock :: MVar ()
+{-# NOINLINE stderrLock #-}
+stderrLock = unsafePerformIO $ newMVar ()
 
 logTimeFormat :: String
 logTimeFormat = "%Y-%m-%dT%H:%M:%S"
@@ -112,12 +117,12 @@ renderLevel LevelFatal = "[FATAL]"
 -- NOTE: Atavachron.Logging will also clear the stderr line before logging to prevent
 -- garbled output when interleaved with stdout.
 putProgress :: MonadIO m => String -> m ()
-putProgress s = liftIO $ hPutStr stderr $ "\r\ESC[K" ++ s
+putProgress s = liftIO $ withMVar stderrLock (\_ -> hPutStr stderr $ "\r\ESC[K" ++ s)
 
 -- | clear the stderr progress line
 resetStdErrCursor :: MonadIO m => m ()
-resetStdErrCursor = liftIO $ hPutStr stderr "\r\ESC[K"
+resetStdErrCursor = liftIO $ withMVar stderrLock (\_ -> hPutStr stderr "\r\ESC[K")
 
 -- | Print a newline to always leave the last stderr progress line visible at the end
 retainProgress :: MonadIO m => m ()
-retainProgress = liftIO $ hPutStr stderr "\n"
+retainProgress = liftIO $ withMVar stderrLock (\_ -> hPutStr stderr "\n")
