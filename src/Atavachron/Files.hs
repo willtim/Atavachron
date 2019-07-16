@@ -117,9 +117,13 @@ saveFiles str = do
                 maybe (return ()) closeFile open
                 case other of
                     DirItem FileMeta{..} -> liftIO $ do
-                        Dir.createDirectory (getRawFilePath filePath) fileMode
-                        fp <- getFilePath filePath
-                        logDebug $ "Wrote directory '" <> T.pack fp <> "'"
+                        let rfp = getRawFilePath filePath
+                        exists <- Files.fileExist rfp
+                        -- do not error if a directory already exists
+                        unless exists $ do
+                            Dir.createDirectory rfp fileMode
+                            fp <- getFilePath filePath
+                            logDebug $ "Wrote directory '" <> T.pack fp <> "'"
                     LinkItem FileMeta{..} target -> liftIO $ do
                         Files.createSymbolicLink target (getRawFilePath filePath)
                         fp <- getFilePath filePath
