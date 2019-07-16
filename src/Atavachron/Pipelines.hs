@@ -627,7 +627,7 @@ measureStoredSize Chunk{..} = do
     let encodedSize = fromIntegral $ B.length (cSecretBox cContent)
     modify $ over prStoredSize (+ encodedSize)
 
--- | Measure the total size before de-duplication.
+-- | Measure the size saved by de-duplication.
 measureDedupSize
     :: MonadState Progress m
     => Maybe Int
