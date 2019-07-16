@@ -159,7 +159,7 @@ uploadPipeline str = do
     measure (cc@Chunk{..}, isDuplicate) = do
         unless isDuplicate $ do
             measureStoredSize cc
-            modify $ over prDedupSize (+ maybe 0 fromIntegral cOriginalSize)
+            measureDedupSize  cOriginalSize
         return (cOffsets, cStoreID)
 
     mapLeftM :: forall m a b c. Monad m => (a -> m c) -> Either a b -> m (Either c b)
@@ -290,13 +290,14 @@ dedupChunk
   -> m (Either (PlainChunk t) (TaggedOffsets t, StoreID))
 dedupChunk conn c@Chunk{..} = do
     -- collect some statistics
-    let chunkSize = fromIntegral $ B.length cContent
+    let chunkSize = B.length cContent
     modify $ over prChunks    succ
-           . over prInputSize (+ chunkSize)
+           . over prInputSize (+ fromIntegral chunkSize)
     -- query chunk cache
     isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
     if isDuplicate
-       then -- duplicate
+       then do -- duplicate
+           measureDedupSize (Just chunkSize)
            return $ Right (cOffsets, cStoreID)
        else
            return $ Left c
@@ -625,6 +626,14 @@ measureStoredSize
 measureStoredSize Chunk{..} = do
     let encodedSize = fromIntegral $ B.length (cSecretBox cContent)
     modify $ over prStoredSize (+ encodedSize)
+
+-- | Measure the total size before de-duplication.
+measureDedupSize
+    :: MonadState Progress m
+    => Maybe Int
+    -> m ()
+measureDedupSize size = do
+    modify $ over prDedupSize (+ maybe 0 fromIntegral size)
 
 -- | Run an action using a temporary chunk cache
 withChunkCache
