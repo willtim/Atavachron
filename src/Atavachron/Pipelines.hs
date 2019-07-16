@@ -131,17 +131,39 @@ restoreFiles
 -- | The complete upload pipeline: CDC chunking, encryption,
 -- compression and upload to remote location.
 uploadPipeline
-  :: (MonadReader Env m, MonadState Progress m, MonadResource m, Eq t, Show t)
+  :: forall m t r. (MonadReader Env m, MonadState Progress m, MonadResource m, Eq t, Show t)
   => Stream' (RawChunk t B.ByteString) m r
   -> Stream' (t, ChunkList) m r
-uploadPipeline
-    = packChunkLists
-    . progressMonitor . S.copy
-    . S.mergeEither
-    . S.left (storeChunks . encodeChunks)
-    . dedupChunks
-    . hashChunks
-    . rechunkCDC
+uploadPipeline str = do
+    env@Env{..} <- lift ask
+    let Manifest{..} = repoManifest envRepository
+        parMap :: (a -> IO b) -> Stream' a m r -> Stream' b m r
+        parMap = S.parMap envTaskBufferSize envTaskGroup
+    packChunkLists
+        . progressMonitor . S.copy
+        . S.mergeEither
+        . withChunkCache $ \conn ->
+            sinkLeftIntoCache conn
+                . S.mapM (mapLeftM measure)
+                . parMap (mapLeftM $ storeChunk envRetries envRepository <=< encodeChunk env)
+                . S.mapM (dedupChunk conn) -- duplicates passed on the right
+                . parMap (\c -> return $! hashChunk mStoreIDKey c)
+                . rechunkCDC
+                $ str
+  where
+    sinkLeftIntoCache conn = S.mapM_ sink . S.copy
+      where
+        sink = either (liftIO . ChunkCache.insert conn . snd) (const $ return ())
+
+    measure :: (CipherChunk t, Bool) -> m (TaggedOffsets t, StoreID)
+    measure (cc@Chunk{..}, isDuplicate) = do
+        unless isDuplicate $ do
+            measureStoredSize cc
+            modify $ over prDedupSize (+ maybe 0 fromIntegral cOriginalSize)
+        return (cOffsets, cStoreID)
+
+    mapLeftM :: forall m a b c. Monad m => (a -> m c) -> Either a b -> m (Either c b)
+    mapLeftM f = either (fmap Left . f) (return . Right)
 
 -- | A download pipeline that does not abort on errors.
 downloadPipeline
@@ -258,77 +280,43 @@ overChangedFiles f
         g (Change y) = Just $ Left y
         g (Delete _) = Nothing
 
--- | Hash the supplied stream of chunks using multiple cores.
-hashChunks
-  :: (MonadReader Env m, MonadIO m)
-  => Stream' (RawChunk (TaggedOffsets t) B.ByteString) m r
-  -> Stream' (PlainChunk t) m r
-hashChunks str = do
-    Env{..} <- lift ask
-    let Manifest{..} = repoManifest envRepository
-    flip (S.parMap envTaskBufferSize envTaskGroup) str $ \c ->
-        liftIO $ return $! hashChunk mStoreIDKey c
-
 -- | Separate out duplicate chunks.
 -- Unseen chunks are passed on the left, known duplicates on the right.
 -- Uses an on-disk persistent chunks cache for de-duplication.
-dedupChunks
+dedupChunk
   :: (MonadReader Env m, MonadState Progress m, MonadResource m)
-  => Stream' (PlainChunk t) m r
-  -> Stream' (Either (PlainChunk t) (TaggedOffsets t, StoreID)) m r
-dedupChunks str = do
-    withChunkCache $ \conn ->
-        flip S.mapM str $ \c@Chunk{..} -> do
-            -- collect some statistics
-            let chunkSize = fromIntegral $ B.length cContent
-            modify $ over prChunks    succ
-                   . over prInputSize (+ chunkSize)
-            -- query chunk cache
-            isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
-            if isDuplicate
-               then -- duplicate
-                   return $ Right (cOffsets, cStoreID)
-               else
-                   return $ Left c
+  => ChunkCache.Connection
+  -> PlainChunk t
+  -> m (Either (PlainChunk t) (TaggedOffsets t, StoreID))
+dedupChunk conn c@Chunk{..} = do
+    -- collect some statistics
+    let chunkSize = fromIntegral $ B.length cContent
+    modify $ over prChunks    succ
+           . over prInputSize (+ chunkSize)
+    -- query chunk cache
+    isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
+    if isDuplicate
+       then -- duplicate
+           return $ Right (cOffsets, cStoreID)
+       else
+           return $ Left c
 
--- | Compress and encrypt the supplied stream of chunks using multiple cores.
-encodeChunks
-  :: (MonadReader Env m, MonadState Progress m, MonadIO m)
-  => Stream' (PlainChunk t) m r
-  -> Stream' (CipherChunk t) m r
-encodeChunks str = do
-    Env{..} <- lift ask
-    let Manifest{..} = repoManifest envRepository
-    flip (S.parMap envTaskBufferSize envTaskGroup) str $
-        liftIO . encryptChunk mChunkKey
-               . compressChunk
-
--- | Store (upload) a stream of chunks using multiple cores.
-storeChunks
-    :: forall m t r. (Show t, MonadState Progress m, MonadReader Env m, MonadResource m)
-    => Stream' (CipherChunk t) m r
-    -> Stream' (TaggedOffsets t, StoreID) m r
-storeChunks str = do
-    Env{..} <- lift ask
-    withChunkCache $ \conn ->
-        S.mapM_ (liftIO . ChunkCache.insert conn . snd)
-              . S.copy
-              . S.mapM measure
-              . S.parMap envTaskBufferSize envTaskGroup (storeChunk envRetries envRepository)
-              $ str
+-- | Compress and encrypt the supplied chunk.
+encodeChunk
+  :: Env
+  -> PlainChunk t
+  -> IO (CipherChunk t)
+encodeChunk Env{..}
+    = encryptChunk mChunkKey
+    . compressChunk
   where
-    measure :: (CipherChunk t, Bool) -> m (TaggedOffsets t, StoreID)
-    measure (cc@Chunk{..}, isDuplicate) = do
-        unless isDuplicate $ do
-            measureStoredSize cc
-            modify $ over prDedupSize (+ maybe 0 fromIntegral cOriginalSize)
-        return (cOffsets, cStoreID)
+    Manifest{..} = repoManifest envRepository
 
 -- | Store a ciphertext chunk (likely an upload to a remote repo).
 -- NOTE: this throws a fatal error if it cannot successfully upload a
 -- chunk after exceeding the retry limit.
-storeChunk :: Int -> Repository -> CipherChunk t -> IO (CipherChunk t, Bool)
-storeChunk retries repo cc@Chunk{..} = do
+storeChunk :: MonadIO m => Int -> Repository -> CipherChunk t -> m (CipherChunk t, Bool)
+storeChunk retries repo cc@Chunk{..} = liftIO $ do
     res <- retryWithExponentialBackoff retries $ do
         logDebug $ "Storing chunk " <> T.pack (show cStoreID)
         putChunk repo cStoreID cContent
@@ -574,7 +562,7 @@ decodeChunks str = do
     let Manifest{..} = repoManifest envRepository
     flip (S.parMap envTaskBufferSize envTaskGroup) str $ \cc ->
         return
-            . maybe (Left $ toError cc) Right
+           $! maybe (Left $ toError cc) Right
             . fmap decompressChunk
             . decryptChunk mChunkKey
             $ cc

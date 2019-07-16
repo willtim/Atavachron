@@ -88,6 +88,8 @@ evaluate n = buffer mempty
               buffer (buf Seq.|> a) rest
 
 -- | maps over left values, leaving right values unchanged.
+-- NOTE: for non-synchronous streams, the relative ordering of elements may be affected (!)
+-- Use @reinterleaveRights@ to recover correct relative ordering.
 left
   :: Monad m
   => (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
@@ -98,6 +100,7 @@ left f = S.maps S.sumToEither
        . S.maps S.eitherToSum
 
 -- | maps over right values, leaving left values unchanged.
+-- NOTE: for non-synchronous streams, the relative ordering of elements may be affected (!)
 right
   :: Monad m
   => (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
@@ -108,13 +111,13 @@ right f = S.map swap . left f . S.map swap
     swap = either Right Left
 
 -- | apply a partial transformation to a stream which already might contain errors.
+-- NOTE: for non-synchronous streams, the relative ordering of elements may be affected (!)
 bind
   :: Monad m
   => (Stream' a (Stream (Of e) m) r -> Stream' (Either e b) (Stream (Of e) m) r)
   -> Stream' (Either e a) m r
   -> Stream' (Either e b) m r
 bind f = S.map join . right f
-
 
 -- | filter out right values.
 lefts
@@ -189,7 +192,7 @@ mapAccum f = loop
                 loop accum' str'
 {-# INLINE mapAccum #-}
 
--- | As mapAccum, but does return the final accumulation/state.
+-- | As mapAccum, but does not return the final accumulation/state.
 mapAccum_
     :: Monad m
     => (a -> b -> (a, c))
