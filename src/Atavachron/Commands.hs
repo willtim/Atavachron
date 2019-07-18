@@ -563,17 +563,11 @@ runPrune
     -> Bool
     -> IO ()
 runPrune mcfg repo source settings dryRun = do
-    case source of
-        Just (host, path) ->
-            putStrLn $ prefix <> "Pruning snapshots for //" <> T.unpack host <> show path <> "..."
-        Nothing ->
-            putStrLn $ prefix <> "Pruning all snapshots in the repository..."
-
     env <- makeEnv mcfg repo rootDir noFileGlobs
     let stream = maybe (Repository.listSnapshots repo)
                        (Repository.listSnapshotsForSource repo)
                        source
-    snapshots <- fmap Map.fromList . runResourceT
+    snapshotsAll <- runResourceT
         . S.toList_
         . S.map (\(key, e'snap) ->
             case e'snap of
@@ -582,31 +576,43 @@ runPrune mcfg repo source settings dryRun = do
                 Right snap -> (key, snap))
         $ stream
 
-    let snapshots_pruned = Prune.pruneSnapshots settings snapshots
-        deletions = snapshots `Map.difference` snapshots_pruned
+    -- group by (host, path) and apply prune seperately to each distinct group
+    let snapshotGroups
+            = Map.toList
+            . Map.map (Map.fromList)
+            $ foldr (uncurry $ Map.insertWith (++)) mempty
+                [ ((sHostName, sHostDir), [(k, s)])
+                | (k, s@Snapshot{..}) <- snapshotsAll]
 
-    unless (Map.null deletions) $ do
-        putStrLn $ "Deletions" <> if dryRun then " (proposed):" else ":"
-        mapM_ (uncurry printSnapshotRow) $ Map.toList deletions
+    forM_ snapshotGroups $ \((host, hostDir), snapshots) -> do
 
-    when (not dryRun) $ do
-        -- Delete snapshots
-        forM_ (Map.elems deletions) $ \snapshot -> do
-            e <- Repository.deleteSnapshot repo snapshot
-            case e of
-                Left ex  -> logWarn $ "Could not delete snapshot " <> T.pack (show snapshot)
-                                <> " : " <> T.pack (show ex)
-                Right () -> return ()
+        path <- getFilePath hostDir
+        putStrLn $ prefix <> "Pruning snapshots for //" <> T.unpack host <> path <> " ..."
 
-        -- Incremental Garbage collection
-        runResourceT
-            . flip evalStateT initialProgress
-            . flip runReaderT env
-            $ collectGarbage repo (Just . toStream $ deletions)
-                >> cleanUpTempFiles
+        let snapshots_pruned = Prune.pruneSnapshots settings snapshots
+            deletions = snapshots `Map.difference` snapshots_pruned
 
-        logInfo "Pruning complete."
+        unless (Map.null deletions) $ do
+            putStrLn $ "Deletions" <> if dryRun then " (proposed):" else ":"
+            mapM_ (uncurry printSnapshotRow) $ Map.toList deletions
 
+        when (not dryRun) $ do
+            -- Delete snapshots
+            forM_ (Map.elems deletions) $ \snapshot -> do
+                e <- Repository.deleteSnapshot repo snapshot
+                case e of
+                    Left ex  -> logWarn $ "Could not delete snapshot " <> T.pack (show snapshot)
+                                    <> " : " <> T.pack (show ex)
+                    Right () -> return ()
+
+            -- Incremental Garbage collection
+            runResourceT
+                . flip evalStateT initialProgress
+                . flip runReaderT env
+                $ collectGarbage repo (Just . toStream $ deletions)
+                    >> cleanUpTempFiles
+
+    logInfo $ "Prune complete."
   where
     prefix | dryRun    = "DRY RUN: "
            | otherwise = ""
