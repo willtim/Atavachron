@@ -4,7 +4,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -50,7 +49,7 @@ import GHC.Generics (Generic)
 import Atavachron.Env
 import Atavachron.Repository
 import Atavachron.Path
-import Atavachron.Streaming (Stream')
+import Atavachron.Streaming (Stream', StreamF)
 import qualified Atavachron.Streaming as S
 import Atavachron.Chunk.Builder
 
@@ -284,7 +283,7 @@ diff f g = loop
     fileMTime2 = fileMTime . g
 
 
-data DeserialiseTreeError = DeserialiseTreeError SomeException
+newtype DeserialiseTreeError = DeserialiseTreeError SomeException
     deriving Show
 
 instance Exception DeserialiseTreeError
@@ -300,12 +299,12 @@ serialiseTree str = do
     S.map (RawChunk Tree . LB.toStrict . serialise)
       . relativePaths sourceDir
       . S.map mkTreeEntry
-      . S.left compressLists
+      . overFileItems fst compressLists
       $ str
   where
 
     mkTreeEntry
-        :: (Either (FileItem, ChunkList) OtherItem)
+        :: Either (FileItem, ChunkList) OtherItem
         -> TreeEntry Abs
     mkTreeEntry (Left (file, chunks))         = FileEntry file chunks
     mkTreeEntry (Right (DirItem dir))         = DirEntry dir
@@ -319,7 +318,7 @@ deserialiseTree
     -> Stream' (Either (FileItem, ChunkList) OtherItem) m r
 deserialiseTree str = do
     targetDir <- lift . asks $ envDirectory
-    S.left uncompressLists
+    overFileItems fst uncompressLists
         . S.map extract
         . absolutePaths targetDir
         . loop deserialiseIncremental Nothing
@@ -340,7 +339,7 @@ deserialiseTree str = do
                 let unused' = toBS m'unused <> unused
                 case res of
                     Left r     | B.null unused -> return r
-                               | otherwise     -> loop deserialiseIncremental (Just $ unused') str
+                               | otherwise     -> loop deserialiseIncremental (Just unused') str
                     Right (RawChunk{..}, str') -> loop deserialiseIncremental (Just $ unused' <> rcData) str'
 
             Fail _ _ ex -> throwM $ DeserialiseTreeError (toException ex)
@@ -440,7 +439,18 @@ filterItems extract str = do
         S.each (fmap (Right . DirItem) dirs) >> S.yield x
 
     isPrefixOf' item1 item2 =
-        isPrefixOf (filePath item1) (filePath item2)
+         filePath item1 `isPrefixOf` filePath item2
 
     pushDir item dirs =
         Seq.filter (`isPrefixOf'` item) dirs Seq.|> item
+
+overFileItems
+    :: Monad m
+    => (b -> FileItem)
+    -> StreamF a b (Stream (Of OtherItem) m) r
+    -> StreamF (Either a OtherItem) (Either b OtherItem) m r
+overFileItems getFileItem = S.left fileElems otherElems
+  where
+    fileElems = pathElems . filePath . getFileItem
+    otherElems (DirItem item)    = pathElems (filePath item)
+    otherElems (LinkItem item _) = pathElems (filePath item)

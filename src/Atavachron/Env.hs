@@ -45,7 +45,7 @@ newtype FilePredicate = FilePredicate
     { unFilePredicate :: forall t. Path Rel t -> IO Bool }
 
 applyPredicate :: FilePredicate -> Path Rel t -> IO Bool
-applyPredicate (FilePredicate f) item = f item
+applyPredicate (FilePredicate f) = f
 
 allFiles :: FilePredicate
 allFiles = FilePredicate (const $ return True)

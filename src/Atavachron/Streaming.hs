@@ -3,7 +3,6 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Streaming utilities
@@ -12,7 +11,6 @@ module Atavachron.Streaming where
 
 import Prelude hiding (concatMap)
 import qualified Control.Arrow as Arr
-import Control.Monad as M
 import Control.Monad.Base
 import Control.Monad.Trans.Resource
 
@@ -78,7 +76,7 @@ evaluate n = buffer mempty
         Left r -> do
           S.each buf -- yield remaining
           return r
-        Right (a,rest) -> do
+        Right (a,rest) ->
           case Seq.viewl buf of
             -- yield buffer head, only if buffer is full
             a' Seq.:< _ | Seq.length buf >= n -> do
@@ -88,36 +86,32 @@ evaluate n = buffer mempty
               buffer (buf Seq.|> a) rest
 
 -- | maps over left values, leaving right values unchanged.
--- NOTE: for non-synchronous streams, the relative ordering of elements may be affected (!)
--- Use @reinterleaveRights@ to recover correct relative ordering.
+-- Suitable for non-synchronous streams, reinterleaves values using supplied ordering.
 left
-  :: Monad m
-  => (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
+  :: (Ord d, Monad m)
+  => (b -> d)
+  -> (c -> d)
+  -> (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
   -> Stream' (Either a c) m r
   -> Stream' (Either b c) m r
-left f = S.maps S.sumToEither
-       . S.unseparate . f . S.separate
-       . S.maps S.eitherToSum
+left bo co f
+    = reinterleaveRights bo co
+    . S.maps S.sumToEither
+    . S.unseparate . f . S.separate
+    . S.maps S.eitherToSum
 
 -- | maps over right values, leaving left values unchanged.
--- NOTE: for non-synchronous streams, the relative ordering of elements may be affected (!)
+-- Suitable for non-synchronous streams, reinterleaves values using supplied ordering.
 right
-  :: Monad m
-  => (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
+  :: (Ord d, Monad m)
+  => (c -> d)
+  -> (b -> d)
+  -> (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
   -> Stream' (Either c a) m r
   -> Stream' (Either c b) m r
-right f = S.map swap . left f . S.map swap
+right co bo f = S.map swap . left bo co f . S.map swap
   where
     swap = either Right Left
-
--- | apply a partial transformation to a stream which already might contain errors.
--- NOTE: for non-synchronous streams, the relative ordering of elements may be affected (!)
-bind
-  :: Monad m
-  => (Stream' a (Stream (Of e) m) r -> Stream' (Either e b) (Stream (Of e) m) r)
-  -> Stream' (Either e a) m r
-  -> Stream' (Either e b) m r
-bind f = S.map join . right f
 
 -- | filter out right values.
 lefts
@@ -164,13 +158,12 @@ reinterleaveRights f g = loop Seq.empty
             Right (e'item, str') ->
                 case e'item of
                     l@(Left item) -> do
-                        let !predicate = (/=GT) . (flip compare $ f item) . g
+                        let !predicate = (/=GT) . flip compare (f item) . g
                             (!pending, !items') = Seq.spanl predicate items
                         S.each $ fmap Right pending Seq.|> l
                         loop items' str'
                     Right nrItem ->
                         loop (items Seq.|> nrItem) str'
-
 
 -- | Apply a function to every element in the stream, while threading
 -- an accumulator/state.
@@ -200,7 +193,7 @@ mapAccum_
     -> Stream (Of b) m r
     -> Stream (Of c) m r
 mapAccum_ f a =
-    liftM (\(_ :> r) -> r) . mapAccum f a
+    fmap (\(_ :> r) -> r) . mapAccum f a
 {-# INLINE mapAccum_ #-}
 
 -- | Apply a monadic function to every element in the stream, while
@@ -231,7 +224,7 @@ mapAccumM_
     -> Stream (Of b) m r
     -> Stream (Of c) m r
 mapAccumM_ f a =
-    liftM (\(_ :> r) -> r) . mapAccumM f a
+    fmap (\(_ :> r) -> r) . mapAccumM f a
 {-# INLINE mapAccumM_ #-}
 
 

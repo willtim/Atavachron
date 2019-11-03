@@ -104,6 +104,7 @@ deleteGarbage repo = do
                    let diff = fromIntegral $ diffDays (utctDay t1) (utctDay t0)
                    if (diff >= ttl) -- expiry condition
                        then do
+                           -- TODO delete in batches (!)
                            res <- liftIO $ deleteGarbageChunk repo storeID
                            case res of
                                Left ex -> do

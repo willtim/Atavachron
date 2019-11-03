@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -10,7 +8,6 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
 
 -- | Stream pipelines for backup, restore, verify etc.
 --
@@ -151,6 +148,9 @@ uploadPipeline str = do
                 . rechunkCDC
                 $ str
   where
+    sinkLeftIntoCache
+        :: forall a b. ChunkCache.Connection
+        -> StreamF (Either (a, StoreID) b) (Either (a, StoreID) b) m r
     sinkLeftIntoCache conn = S.mapM_ sink . S.copy
       where
         sink = either (liftIO . ChunkCache.insert conn . snd) (const $ return ())
@@ -162,9 +162,6 @@ uploadPipeline str = do
             measureDedupSize  cOriginalSize
         return (cOffsets, cStoreID)
 
-    mapLeftM :: forall m a b c. Monad m => (a -> m c) -> Either a b -> m (Either c b)
-    mapLeftM f = either (fmap Left . f) (return . Right)
-
 -- | A download pipeline that does not abort on errors.
 downloadPipeline
     :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
@@ -172,10 +169,48 @@ downloadPipeline
     -> Stream' (Either (Error FileItem) (PlainChunk FileItem)) m ()
 downloadPipeline
     = progressMonitor . S.copy
-    . S.bind verifyChunks
-    . S.bind decodeChunks
-    . retrieveChunks
+    . downloadChunks
     . unpackChunkLists
+
+downloadChunks
+    :: forall m t r. (MonadState Progress m, MonadReader Env m, MonadIO m, Show t)
+    => Stream' (TaggedOffsets t, StoreID) m r
+    -> Stream' (Either (Error t) (PlainChunk t)) m r
+downloadChunks str = do
+    Env{..} <- lift ask
+    let m@Manifest{..} = repoManifest envRepository
+        parMap :: (a -> IO b) -> Stream' a m r -> Stream' b m r
+        parMap = S.parMap envTaskBufferSize envTaskGroup
+
+    S.mapM measure
+      . parMap (\e'c -> return $! (e'c >>= decodeChunk m >>= verifyChunk m))
+      . S.mapM (mapRightM $ \cc -> measureStoredSize cc >> return cc)
+      . parMap (retrieveChunk envRetries envRepository)
+      $ str
+  where
+
+    -- to support the progress monitor
+    measure e'chunk = do
+        modify $ over prFiles     (+ fromIntegral (either (const 0) offsets e'chunk))
+               . over prChunks    (+ 1)
+               . over prInputSize (+ fromIntegral (either (const 0) sizeOf e'chunk))
+               . over prErrors    (+ either (const 1) (const 0) e'chunk)
+        return e'chunk
+
+    offsets c = length (cOffsets c)
+    sizeOf  c = B.length (cContent c)
+
+-- | Decode a chunk, which may fail.
+decodeChunk
+    :: Manifest
+    -> CipherChunk t
+    -> Either (Error t) (PlainChunk t) -- ^ assume decoding may fail
+decodeChunk Manifest{..} cc =
+    maybe (Left $ toError cc) (Right . decompressChunk)
+        . decryptChunk mChunkKey
+       $! cc
+  where
+    toError Chunk{..} = Error DecryptError cOffsets cStoreID Nothing
 
 -- | Download and deserialise the tree.
 snapshotTree
@@ -185,8 +220,7 @@ snapshotTree
 snapshotTree
     = deserialiseTree
     . rechunkToTags
-    . abortOnError decodeChunks
-    . abortOnError retrieveChunks
+    . abortOnError downloadChunks
     . unpackChunkLists
     . snapshotChunkLists
 
@@ -222,23 +256,11 @@ progressMonitor = S.mapM_ $ \_ -> do
         , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
         , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
         , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
-        , "Errors: "        ++ show (_prErrors)
+        , "Errors: "        ++ show _prErrors
         ]
   where
-    rate bytes ndt = round $ (toRational $ bytes `div` megabyte) / (toRational ndt) :: Int
+    rate bytes ndt = round $ toRational (bytes `div` megabyte) / toRational ndt :: Int
     megabyte = 1024*1024
-
-overFileItems
-    :: Monad m
-    => (b -> FileItem)
-    -> StreamF a b (Stream (Of OtherItem) m) r
-    -> StreamF (Either a OtherItem) (Either b OtherItem) m r
-overFileItems getFileItem f =
-    S.reinterleaveRights fileElems otherElems . S.left f
-  where
-    fileElems = pathElems . filePath . getFileItem
-    otherElems (DirItem item)    = pathElems (filePath item)
-    otherElems (LinkItem item _) = pathElems (filePath item)
 
 -- | Report errors during restore and log affected files.
 -- Perhaps in the future we can record broken files and missing chunks
@@ -263,8 +285,7 @@ overChangedFiles
     -> Stream' (FileItem, c) m r
 overChangedFiles f
    = S.mergeEither
-   . S.reinterleaveRights fileElems fileElems
-   . S.left f
+   . S.left fileElems fileElems f
    . fromDiffs
   where
     fileElems = pathElems . filePath . fst
@@ -327,20 +348,6 @@ storeChunk retries repo cc@Chunk{..} = liftIO $ do
         Right isDuplicate ->
             return (cc, isDuplicate)
 
--- | Retrieve (download) a stream of chunks using multiple cores.
-retrieveChunks
-    :: forall m t r. (MonadState Progress m, MonadReader Env m, MonadIO m, Show t)
-    => Stream' (TaggedOffsets t, StoreID) m r
-    -> Stream' (Either (Error t) (CipherChunk t)) m r  -- ^ assume downloading may fail
-retrieveChunks str = do
-    Env{..} <- lift ask
-    S.mapM measure
-        $ S.parMap envTaskBufferSize envTaskGroup (retrieveChunk envRetries envRepository) str
-  where
-    measure :: (Either (Error t) (CipherChunk t)) -> m (Either (Error t) (CipherChunk t))
-    measure (Right cc) = measureStoredSize cc >> return (Right cc)
-    measure (Left e)   = return $ Left e
-
 -- | Retrieve a ciphertext chunk (likely a download from a remote repo).
 -- NOTE: we do not log errors here, instead we return them for aggregation elsewhere.
 retrieveChunk
@@ -352,7 +359,7 @@ retrieveChunk
 retrieveChunk retries repo (offsets, storeID) = do
     logDebug $ "Retrieving chunk " <> T.pack (show storeID)
     res <- retryWithExponentialBackoff retries $ getChunk repo storeID
-    return $ (mkError +++ mkCipherChunk) $ res
+    return $ (mkError +++ mkCipherChunk) res
   where
     mkCipherChunk = Chunk storeID offsets Nothing
     mkError = Error RetrieveError offsets storeID . Just
@@ -419,7 +426,7 @@ commitFilesCache = do
     cacheFile' <- genFilesCacheName "files" >>= resolveCacheFileName'
     res <- try $ liftIO $ Dir.renameFile cacheFile cacheFile'
     case res of
-        Left (ex :: SomeException) -> panic $ "Failed to update cache file: " <> (T.pack $ show ex)
+        Left (ex :: SomeException) -> panic $ "Failed to update cache file: " <> T.pack (show ex)
         Right () -> return ()
 
 resolveTempFileName
@@ -438,7 +445,7 @@ resolveTempFileName' name =
     resolveTempFileName name >>= liftIO . getFilePath
 
 cleanUpTempFiles :: (MonadReader Env m, MonadIO m) => m ()
-cleanUpTempFiles = ask >>= \Env{..} -> liftIO $ do
+cleanUpTempFiles = ask >>= \Env{..} -> liftIO $
     Dir.removeDirectoryRecursive =<< getFilePath envTempPath
 
 resolveCacheFileName
@@ -553,23 +560,6 @@ trimChunks
          then (0, RawChunk item $ B.take (fromIntegral $ fileSize item - accumSize) bs)
          else (accumSize', RawChunk item bs)
 
--- | Decode chunks using multiple cores.
-decodeChunks
-    :: (MonadReader Env m, MonadState Progress m, MonadIO m)
-    => Stream' (CipherChunk t) m r
-    -> Stream' (Either (Error t) (PlainChunk t)) m r   -- ^ assume decoding may fail
-decodeChunks str = do
-    Env{..} <- lift ask
-    let Manifest{..} = repoManifest envRepository
-    flip (S.parMap envTaskBufferSize envTaskGroup) str $ \cc ->
-        return
-           $! maybe (Left $ toError cc) Right
-            . fmap decompressChunk
-            . decryptChunk mChunkKey
-            $ cc
-  where
-    toError Chunk{..} = Error DecryptError cOffsets cStoreID Nothing
-
 -- | We cannot survive errors retrieving the snapshot metadata.
 abortOnError
     :: (MonadThrow m, Exception e)
@@ -579,28 +569,16 @@ abortOnError
 abortOnError f str =
     S.mapM (either throwM return) $ f str -- TODO log also
 
-verifyChunks
-    :: (MonadState Progress m, MonadReader Env m)
-    => Stream' (PlainChunk t) m r
-    -> Stream' (Either (Error t) (PlainChunk t)) m r
-verifyChunks str = do
-    Manifest{..} <- lift . asks $ repoManifest . envRepository
-    S.mapM (measure . (toError +++ id) . verify mStoreIDKey) str
+verifyChunk
+    :: Manifest
+    -> PlainChunk t
+    -> Either (Error t) (PlainChunk t)
+verifyChunk Manifest{..} =
+    (toError +++ id) . verify mStoreIDKey
   where
     toError :: VerifyFailed t -> Error t
     toError (VerifyFailed Chunk{..}) =
         Error VerifyError cOffsets cStoreID Nothing
-
-    -- to support the progress monitor
-    measure e'chunk = do
-        modify $ over prFiles     (+ fromIntegral (either (const 0) offsets e'chunk))
-               . over prChunks    (+ 1)
-               . over prInputSize (+ fromIntegral (either (const 0) sizeOf e'chunk))
-               . over prErrors    (+ either (const 1) (const 0) e'chunk)
-        return e'chunk
-
-    offsets c = length (cOffsets c)
-    sizeOf  c = B.length (cContent c)
 
 newtype VerifyResult = VerifyResult
     { vrErrors :: Seq (Error FileItem)
@@ -632,7 +610,7 @@ measureDedupSize
     :: MonadState Progress m
     => Maybe Int
     -> m ()
-measureDedupSize size = do
+measureDedupSize size =
     modify $ over prDedupSize (+ maybe 0 fromIntegral size)
 
 -- | Run an action using a temporary chunk cache
@@ -646,3 +624,11 @@ withChunkCache f = do
     r <- f conn
     release key
     return r
+
+-- | Monadic map over the left values of an Either type.
+mapLeftM :: Monad m => (a -> m c) -> Either a b -> m (Either c b)
+mapLeftM f = either (fmap Left . f) (return . Right)
+
+-- | Monadic map over the right values of an Either type.
+mapRightM :: Monad m => (b -> m c) -> Either a b -> m (Either a c)
+mapRightM f = either (return . Left) (fmap Right . f)
