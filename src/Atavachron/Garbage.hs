@@ -3,14 +3,9 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
 
 -- | Garbage collection and chunk check/repair procedures.
 --
@@ -26,6 +21,7 @@ import Control.Monad.Morph
 import Control.Monad.Reader.Class
 import Control.Monad.State.Class
 import Control.Monad.Trans.Resource
+import qualified Data.List as List
 import Data.Maybe (isNothing)
 import Data.Time.Calendar (diffDays)
 import qualified Data.Text as T
@@ -61,7 +57,7 @@ collectGarbage repo deletedSnapshots = do
                        deletedSnapshots
 
    when (isNothing deletedSnapshots) $
-       logInfo $ "Performing an exhaustive garbage collection."
+       logInfo "Performing an exhaustive garbage collection."
 
    garbage S.:> _ <-
        S.sum . flip S.mapM garbageStr $ \storeID -> do
@@ -85,7 +81,7 @@ deleteGarbage
     -> m ()
 deleteGarbage repo = do
    --- Run chunk repair first as a precaution against any (old, expired) referenced garbage chunks
-   logInfo $ "Forcing a chunk repair..."
+   logInfo "Forcing a chunk repair..."
    chunkRepair repo
 
    t1  <- asks envStartTime
@@ -93,30 +89,39 @@ deleteGarbage repo = do
 
    logInfo $ "Finding and deleting expired garbage (expiry is " <> T.pack (show ttl) <> " days)..."
    deleted S.:> _ <-
-       S.sum . flip S.mapM garbageChunks $ \storeID -> do
+       S.sum
+       . S.mapM deleteGarbageChunks'
+       . S.mapped S.toList
+       . S.chunksOf 100 -- delete in batches of 100
+       . S.concat       -- remove Nothings
+       . flip S.mapM garbageChunks $ \storeID -> do
            e't0  <- liftIO $ getGarbageModTime repo storeID
            case e't0 of
                Left ex -> do
                    logWarn $ "Could not query modification time of garbage chunk " <> T.pack (show storeID)
                        <> " : " <> T.pack (show ex)
-                   return 0
+                   return Nothing
                Right t0 -> do
                    let diff = fromIntegral $ diffDays (utctDay t1) (utctDay t0)
-                   if (diff >= ttl) -- expiry condition
-                       then do
-                           -- TODO delete in batches (!)
-                           res <- liftIO $ deleteGarbageChunk repo storeID
-                           case res of
-                               Left ex -> do
-                                   logWarn $ "Could not delete garbage chunk " <> T.pack (show storeID)
-                                       <> " : " <> T.pack (show ex)
-                                   return 0
-                               Right () -> return (1::Integer)
-                       else return 0
+                   if diff >= ttl -- expiry condition
+                       then return $ Just storeID
+                       else return Nothing
 
    logInfo $ "Garbage deleted: " <> T.pack (show deleted) <> " chunks."
   where
    garbageChunks = hoist liftResourceT $ listGarbageChunks repo
+
+   -- delete chunks in batches
+   deleteGarbageChunks' storeIDs = liftIO $ do
+       res <- liftIO $ deleteGarbageChunks repo storeIDs
+       case res of
+           Left ex -> do
+               logWarn $ "Could not delete garbage chunks: " <> T.pack (show storeIDs)
+                   <> " : " <> T.pack (show ex)
+               return 0
+           Right () -> return (List.genericLength storeIDs ::Integer)
+
+
 
 -- | Find garbage by considering every chunk in the repository and
 -- using the entire set of snapshots. This /exhaustive collection/ is
@@ -143,7 +148,7 @@ findGarbageIncremental
     => Repository
     -> Stream' (SnapshotName, Snapshot) m ()
     -> m (Stream' StoreID m ())
-findGarbageIncremental repo deletedSnapshots = do
+findGarbageIncremental repo deletedSnapshots =
     chunkDifference deletedChunks rootChunks
   where
     rootChunks    = S.concatMap (collectChunks . snd) $ listSnapshotsPartial repo
@@ -188,7 +193,7 @@ showChunksReceived
 showChunksReceived = S.mapM_ $ \_ -> do
     modify (over prChunks succ)
     gets _prChunks >>= \n ->
-        when (n `mod` 100==0) $ putProgress $ "Chunks received: " ++ (show n)
+        when (n `mod` 100==0) $ putProgress $ "Chunks received: " ++ show n
 
 -- | Check that the the on-disk chunk cache state is empty, as expected.
 assertCacheEmpty
@@ -196,7 +201,7 @@ assertCacheEmpty
   => m ()
 assertCacheEmpty = do
     size <- withChunkCache $ liftIO . ChunkCache.size
-    when (size /= 0) $ panic $ "Assertion failed! Chunk cache is not empty."
+    when (size /= 0) $ panic "Assertion failed! Chunk cache is not empty."
 
 listSnapshotsPartial :: MonadResource m => Repository -> Stream' (SnapshotName, Snapshot) m ()
 listSnapshotsPartial repo =
@@ -218,7 +223,7 @@ chunkCheck repo = do
     assertCacheEmpty
 
     -- Add chunks referenced by all snapshots in the repository to cache.
-    logInfo $ "Listing chunks referenced by snapshots..."
+    logInfo "Listing chunks referenced by snapshots..."
     sinkChunks snapChunks ChunkCache.insert
 
     -- This is all referenced chunks from all repository snapshots
@@ -230,7 +235,7 @@ chunkCheck repo = do
     -- There are two sets we are interested in:
     -- 1) missing: chunks in cache, not in this stream
     -- 2) collectable: chunks in this stream, but not in cache
-    logInfo $ "Listing all chunks in repository..."
+    logInfo "Listing all chunks in repository..."
     collectable S.:> _ <- count $ filterNotInChunkCache repoChunks
     missing <- cacheSize
 
@@ -239,7 +244,7 @@ chunkCheck repo = do
     -- 1) referenced garbage: chunks in cache and in garbage stream
     -- 2) garbage (unreferenced): chunks not in cache, but in the stream
     -- 3) missing completely: chunks in cache, but not in stream
-    logInfo $ "Listing all garbage chunks in repository..."
+    logInfo "Listing all garbage chunks in repository..."
     unreferenced_garbage S.:> _ <- count $ filterNotInChunkCache garbageChunks
     missing_completely <- cacheSize
 
@@ -301,12 +306,12 @@ chunkRepair repo = do
     assertCacheEmpty
 
     -- Add chunks referenced by all snapshots in the repository to cache.
-    logInfo $ "Listing chunks referenced by snapshots..."
+    logInfo "Listing chunks referenced by snapshots..."
     sinkChunks snapChunks ChunkCache.insert
 
     -- List all chunks in repo and remove them from the cache.
     -- The cache should then contain missing chunks.
-    logInfo $ "Listing all chunks in repository..."
+    logInfo "Listing all chunks in repository..."
     sinkChunks repoChunks ChunkCache.delete
 
     withChunkCache $ \conn -> do
@@ -314,7 +319,7 @@ chunkRepair repo = do
         flip S.mapM_ missingStr $ \storeID -> do
            e'present <- liftIO $ hasGarbageChunk repo storeID
            case e'present of
-               Left err -> do
+               Left err ->
                    panic $ "Could not determine presence of garbage chunk " <> T.pack (show storeID)
                        <> " : " <> T.pack (show err)
                Right True -> do
@@ -324,7 +329,7 @@ chunkRepair repo = do
                        Left err -> logWarn $ "Could not restore garbage chunk " <> T.pack (show storeID)
                            <> " : " <> T.pack (show err)
                        Right () -> return ()
-               Right False -> do
+               Right False ->
                    panic $ "Chunk is missing from the repository: " <> T.pack (show storeID)
                        <> " : Please verify the latest backups!"
   where

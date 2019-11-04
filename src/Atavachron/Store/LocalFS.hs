@@ -57,10 +57,10 @@ newLocalFS name root = Store{..}
         destFile <- keyToFileName dest
         Dir.renameFile srcFile destFile
 
-    delete :: Store.Key -> IO ()
-    delete key = do
-        fileName <- keyToFileName key
-        Dir.removeFile fileName
+    delete :: [Store.Key] -> IO ()
+    delete keys = do
+        fileNames <- mapM keyToFileName keys
+        mapM_ Dir.removeFile fileNames
 
     modTime :: Store.Key -> IO UTCTime
     modTime key = do

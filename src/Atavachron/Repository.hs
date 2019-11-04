@@ -24,7 +24,7 @@ module Atavachron.Repository
       -- * Functions
     , authenticate
     , authenticate'
-    , deleteGarbageChunk
+    , deleteGarbageChunks
     , deleteSnapshot
     , doesSnapshotExist
     , garbageCollectChunk
@@ -273,7 +273,7 @@ getChunk :: Repository -> StoreID -> IO (Either SomeException CipherText)
 getChunk Repository{..} storeID = do
     res <- get chunksPath
     case res of
-        Left (fromException -> Just (MissingObject{})) -> get garbagePath
+        Left (fromException -> Just MissingObject{}) -> get garbagePath
         _ -> return res
   where
     get path = do
@@ -380,7 +380,7 @@ getSnapshotByKey repo key = do
 
 -- | Query the store for the existence of a snapshot using a potentially partial key.
 doesSnapshotExist :: Repository -> SnapshotName -> IO Bool
-doesSnapshotExist repo partialKey = do
+doesSnapshotExist repo partialKey =
     -- for now we will just list all the snapshots and search them
     runResourceT
         . S.fold_ (\_ _ -> True) False id
@@ -399,7 +399,7 @@ putSnapshot Repository{..} snapshot = do
     res <- encryptBytes (unChunkKey $ mChunkKey repoManifest) pickled
                >>= try . Store.put repoStore key . serialise
 
-    return $ const (Store.kName key) <$> res
+    return $ Store.kName key <$ res
 
 -- | Permanently delete a snapshot. Used by the pruning command.
 -- NOTE: This is a destructive update!
@@ -407,7 +407,7 @@ deleteSnapshot :: Repository -> Snapshot -> IO (Either SomeException ())
 deleteSnapshot Repository{..} snapshot = do
     let key = fst $ computeSnapshotKey repoManifest snapshot
     logDebug $ "Deleting snapshot: " <> Store.kName key
-    try (Store.delete repoStore key)
+    try (Store.delete repoStore [key])
 
 -- | Does the supplied storeID exist in the garbage folder?
 hasGarbageChunk :: Repository -> StoreID -> IO (Either SomeException Bool)
@@ -437,12 +437,13 @@ garbageCollectChunk Repository{..} storeID = do
     logDebug $ "Moving to garbage: " <> Store.kName srcKey
     try (Store.move repoStore srcKey destKey)
 
--- | Permanently delete the garbage chunk from the repository (!)
-deleteGarbageChunk :: Repository -> StoreID -> IO (Either SomeException ())
-deleteGarbageChunk Repository{..} storeID = do
-    let key  = mkChunkKey garbagePath storeID
-    logDebug $ "Deleting garbage chunk: " <> Store.kName key
-    try (Store.delete repoStore key)
+-- | Permanently delete the garbage chunks from the repository (!)
+-- NOTE: Attempt better performance by using a batch operation.
+deleteGarbageChunks :: Repository -> [StoreID] -> IO (Either SomeException ())
+deleteGarbageChunks Repository{..} storeIDs = do
+    let keys  = map (mkChunkKey garbagePath) storeIDs
+    logDebug $ "Deleting garbage chunks: " <> T.pack (show $ map Store.kName keys)
+    try (Store.delete repoStore keys)
 
 -- | Compute the key for a snapshot using its contents.
 computeSnapshotKey :: Manifest -> Snapshot -> (Store.Key, B.ByteString)

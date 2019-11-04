@@ -41,6 +41,6 @@ data Store = Store
     -- used by garbage collection
   , move    :: Key -> Key -> IO ()
     -- used by prune and garbage deletion
-  , delete  :: Key -> IO ()
+  , delete  :: [Key] -> IO ()
   , modTime :: Key -> IO UTCTime
   }

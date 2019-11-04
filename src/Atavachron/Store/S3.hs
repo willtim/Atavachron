@@ -1,8 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
 
 {-# LANGUAGE FlexibleContexts #-}
 
@@ -67,7 +65,7 @@ newS3Store name endpoint bucketName = do
         get key = getObject' params bucketName (toObjectKey key)
 
         put :: Store.Key -> LB.ByteString -> IO ()
-        put key bs = putObject' params bucketName (toObjectKey key) bs
+        put key = putObject' params bucketName (toObjectKey key)
 
         hasKey :: Store.Key -> IO Bool
         hasKey key = doesObjectExist params bucketName (toObjectKey key)
@@ -75,8 +73,8 @@ newS3Store name endpoint bucketName = do
         move :: Store.Key -> Store.Key -> IO ()
         move src dest = moveObject params bucketName (toObjectKey src) (toObjectKey dest)
 
-        delete :: Store.Key -> IO ()
-        delete key = deleteObject params bucketName (toObjectKey key)
+        delete :: [Store.Key] -> IO ()
+        delete keys = deleteObjects params bucketName (map toObjectKey keys)
 
         modTime :: Store.Key -> IO UTCTime
         modTime key = objectModTime params bucketName (toObjectKey key)
@@ -165,17 +163,20 @@ moveObject (cfg, s3cfg) b k1 k2 = do
                 S3.DeleteObject {doObjectName=k1,doBucket=b}
         return ()
 
-deleteObject
+deleteObjects
     :: (Config, Endpoint)
     -> BucketName    -- ^ The bucket to store the file in.
-    -> ObjectKey     -- ^ The object to delete.
+    -> [ObjectKey]   -- ^ The objects to delete.
     -> IO ()
-deleteObject (cfg, s3cfg) b k = do
+deleteObjects (cfg, s3cfg) b ks = do
     mgr <- newManager tlsManagerSettings
     runResourceT $ do
-        S3.DeleteObjectResponse {} <-
+        S3.DeleteObjectsResponse {} <-
             Aws.pureAws cfg s3cfg mgr $
-                S3.DeleteObject {doObjectName=k,doBucket=b}
+                S3.DeleteObjects { dosObjects=zip ks (repeat Nothing)
+                                 , dosBucket=b
+                                 , dosQuiet   = True
+                                 , dosMultiFactorAuthentication = Nothing}
         return ()
 
 doesObjectExist
@@ -189,7 +190,7 @@ doesObjectExist (cfg, s3cfg) b k = do
         catchJust selector
             (do { res <- Aws.pureAws cfg s3cfg mgr $ S3.headObject b k
                 ; case res of
-                      S3.HeadObjectResponse (Just{}) -> return True -- 200 OK
+                      S3.HeadObjectResponse Just{} -> return True -- 200 OK
                       _ -> return False })
             (\() -> return False)
   where
