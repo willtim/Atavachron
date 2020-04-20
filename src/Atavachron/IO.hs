@@ -18,6 +18,8 @@ import qualified Data.ByteString.Internal as BSI
 
 import qualified Data.Text as T
 
+import Numeric.Natural
+
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 
@@ -83,14 +85,12 @@ buffer str = do
 -- failure.  Exponential backoff and randomisation ensure that we are
 -- a well-behaved client to a remote service.
 retryWithExponentialBackoff
-    :: forall a. Int
+    :: forall a. Natural
     -> IO (Either SomeException a)
     -> IO (Either SomeException a)
-retryWithExponentialBackoff retries m
-  | retries < 0 = error "retryWithExponentialBackoff: retries must be a positive integer"
-  | otherwise   = loop retries
+retryWithExponentialBackoff retries m = loop retries
   where
-    loop :: Int -> IO (Either SomeException a)
+    loop :: Natural -> IO (Either SomeException a)
     loop n = do
       res <- m
       case res of

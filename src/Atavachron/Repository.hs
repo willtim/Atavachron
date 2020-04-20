@@ -51,7 +51,7 @@ module Atavachron.Repository
 import Codec.Serialise
 import Codec.Serialise.Decoding
 import Codec.Serialise.Encoding
-import qualified Codec.Compression.BZip as BZip
+import qualified Codec.Compression.GZip as GZip
 
 import Control.Exception
 import Control.Monad
@@ -454,20 +454,21 @@ computeSnapshotKey Manifest{..} snapshot = (key, pickled)
     key      = Store.Key snapshotsPath $ hexEncode storeID
 
 -- | Put the program binary (Atavachron itself) in the repository and
--- generate a key for it. We compress using the BZip2 file format and
+-- generate a key for it. We compress using the GZip file format and
 -- do not encrypt or chunk.
 putProgramBinary :: Repository -> IO (Either SomeException StoreID)
 putProgramBinary repo = do
     programPath <- getExecutablePath
     logDebug $ "Storing executable " <> T.pack programPath
-    binary      <- BZip.compress <$> LB.readFile programPath
+
+    binary      <- GZip.compress <$> LB.readFile programPath
     let Manifest{..} = repoManifest repo
         storeID  = hashBytes mStoreIDKey (LB.toStrict binary)
         key      = Store.Key binariesPath $ hexEncode storeID
 
     logDebug $ "Writing Atavachron binary with key: " <> Store.kName key
     res <- try (Store.put (repoStore repo) key binary)
-    return $ const storeID <$> res
+    return $ storeID <$ res
 
 -- | Initialise a repository using the supplied store and password.
 initRepository :: Store -> Text -> IO CachedCredentials
@@ -501,7 +502,7 @@ authenticate :: Store -> Text -> IO (Repository, CachedCredentials)
 authenticate store pass = do
     hasManifest <- Store.hasKey store manifestStoreKey
     unless hasManifest $
-        panic $ "Could not find a repository at the supplied URL"
+        panic "Could not find a repository at the supplied URL"
 
     -- for now, just try each key in succession
     let keyStr = listAccessKeys store
@@ -530,7 +531,7 @@ authenticate' :: Store -> CachedCredentials -> IO Repository
 authenticate' store CachedCredentials{..} = do
     hasManifest <- Store.hasKey store manifestStoreKey
     unless hasManifest $
-        panic $ "Could not find a repository at the supplied URL"
+        panic "Could not find a repository at the supplied URL"
 
     res      <- getAccessKey store ccAccessKeyName
     case res of
@@ -538,7 +539,7 @@ authenticate' store CachedCredentials{..} = do
         Right AccessKey{..} -> do
             let manifestKey = maybe (panic $ "Cached credentials do not match access key: " <> ccAccessKeyName)
                                     ManifestKey
-                            $ (decryptBytes ccPasswordHash akManifestKey >>= Saltine.decode)
+                                    (decryptBytes ccPasswordHash akManifestKey >>= Saltine.decode)
             resolveRepository store manifestKey
 
 -- Loads and decodes the Manifest
@@ -561,7 +562,7 @@ keyFromPassword salt pass = key
            $ Saltine.decode $ Scrypt.getHash hash
     hash   = Scrypt.scrypt params salt (Scrypt.Pass $ encodeUtf8 pass)
     params = fromMaybe (panic "Failed to generate Scrypt parameters")
-           $ Scrypt.scryptParamsLen 14 8 1 (fromIntegral $ ByteSizes.secretBoxKey)
+           $ Scrypt.scryptParamsLen 14 8 1 (fromIntegral ByteSizes.secretBoxKey)
 
 
 -- | List the available access keys for accessing the repository.

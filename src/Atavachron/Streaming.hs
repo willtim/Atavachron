@@ -3,9 +3,9 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-orphans -fno-warn-name-shadowing #-}
 
--- | Streaming utilities
+-- | Streaming utilities.
 --
 module Atavachron.Streaming where
 
@@ -14,104 +14,24 @@ import qualified Control.Arrow as Arr
 import Control.Monad.Base
 import Control.Monad.Trans.Resource
 
-import Control.Concurrent.Async
-import Control.Concurrent.QSem
-
 import Data.Either
 import Data.Function
 import Data.Maybe
 import Data.Monoid
 import qualified Data.Sequence as Seq
+import Numeric.Natural
 
 import Streaming
 import Streaming.Prelude (yield, next)
 import qualified Streaming.Prelude as S
 
+import Atavachron.Executor (Executor)
+import qualified Atavachron.Executor as Executor
+
+
 -- | We typically do not vary the streamed functor
 type Stream' a m r = Stream (Of a) m r
 
--- | A stream transformation
-type StreamF a b m r = Stream' a m r -> Stream' b m r
-
--- | Represents a bounded group of concurrent tasks
-newtype TaskGroup = TaskGroup { getQSem :: QSem }
-
--- | Create a new task group with the supplied maximum number
--- of workers
-mkTaskGroup :: Int -> IO TaskGroup
-mkTaskGroup size = TaskGroup <$> newQSem size
-
--- | Create a new async task using the supplied task group. The
--- spawned task will be blocked if we have already reached the maximum
--- number of concurrent tasks for this task group.
-asyncWithGroup :: TaskGroup -> IO a -> IO (Async a)
-asyncWithGroup (TaskGroup q) m = async (waitQSem q >> m <* signalQSem q)
-
--- | A simple parMap that reads ahead creating async tasks.
---
--- NOTE: Since we force the effects using the supplied buffer size,
--- the interleaving between output events and effects will be changed.
--- This is especially important to consider when the governing monad
--- is itself used to hold another stream of values which are interleaved
--- with the supplied stream.
-parMap
-    :: MonadIO m
-    => Int          -- ^ read-ahead buffer size
-    -> TaskGroup    -- ^ available threads
-    -> (a -> IO b)
-    -> Stream' a m r
-    -> Stream' b m r
-parMap n g f
-    = S.mapM (liftIO . wait)
-    . evaluate n
-    . S.mapM (liftIO . asyncWithGroup g . f)
-
--- | Evaluates the stream (forces the effects) ahead by @n@ items.
-evaluate :: forall a m r. Monad m => Int -> Stream' a m r -> Stream' a m r
-evaluate n = buffer mempty
-  where
-    buffer !buf str = do
-      e <- lift $ next str
-      case e of
-        Left r -> do
-          S.each buf -- yield remaining
-          return r
-        Right (a,rest) ->
-          case Seq.viewl buf of
-            -- yield buffer head, only if buffer is full
-            a' Seq.:< _ | Seq.length buf >= n -> do
-              yield a'
-              buffer (Seq.drop 1 buf Seq.|> a) rest
-            _           ->
-              buffer (buf Seq.|> a) rest
-
--- | maps over left values, leaving right values unchanged.
--- Suitable for non-synchronous streams, reinterleaves values using supplied ordering.
-left
-  :: (Ord d, Monad m)
-  => (b -> d)
-  -> (c -> d)
-  -> (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
-  -> Stream' (Either a c) m r
-  -> Stream' (Either b c) m r
-left bo co f
-    = reinterleaveRights bo co
-    . S.maps S.sumToEither
-    . S.unseparate . f . S.separate
-    . S.maps S.eitherToSum
-
--- | maps over right values, leaving left values unchanged.
--- Suitable for non-synchronous streams, reinterleaves values using supplied ordering.
-right
-  :: (Ord d, Monad m)
-  => (c -> d)
-  -> (b -> d)
-  -> (Stream' a (Stream (Of c) m) r -> Stream' b (Stream (Of c) m) r)
-  -> Stream' (Either c a) m r
-  -> Stream' (Either c b) m r
-right co bo f = S.map swap . left bo co f . S.map swap
-  where
-    swap = either Right Left
 
 -- | filter out right values.
 lefts
@@ -134,36 +54,6 @@ mergeEither
   :: Monad m
   => Stream' (Either b b) m r -> Stream' b m r
 mergeEither = S.map (either id id)
-
--- | The interleaving of items after using e.g. @left@ depends on the
--- chunking when using non-synchronous streams.  This code buffers the
--- right items accordingly to ensure correct ordering.
---
--- NOTE: This direct implementation turned out to be much
--- faster than one based on S.concat and S.mapAccum.
-reinterleaveRights
-    :: (Ord c, Monad m)
-    => (a -> c)
-    -> (b -> c)
-    -> Stream' (Either a b) m r
-    -> Stream' (Either a b) m r
-reinterleaveRights f g = loop Seq.empty
-  where
-    loop !items !str = do
-        res <- lift $ next str
-        case res of
-            Left r -> do
-                S.each $ fmap Right items
-                return r
-            Right (e'item, str') ->
-                case e'item of
-                    l@(Left item) -> do
-                        let !predicate = (/=GT) . flip compare (f item) . g
-                            (!pending, !items') = Seq.spanl predicate items
-                        S.each $ fmap Right pending Seq.|> l
-                        loop items' str'
-                    Right nrItem ->
-                        loop (items Seq.|> nrItem) str'
 
 -- | Apply a function to every element in the stream, while threading
 -- an accumulator/state.
@@ -227,7 +117,6 @@ mapAccumM_ f a =
     fmap (\(_ :> r) -> r) . mapAccumM f a
 {-# INLINE mapAccumM_ #-}
 
-
 -- | NOTE: This appears to be orders-of-magnitude faster than using the
 -- more general @S.for@ provided by "streaming".
 concatMap :: Monad m => (a -> Stream' b m x) -> Stream' a m r -> Stream' b m r
@@ -251,6 +140,12 @@ mapM_ f = loop
             Right (x, str') -> f x >> loop str'
 {-# INLINE mapM_ #-}
 
+forM :: Monad m => Stream' a m r -> (a -> m b) -> Stream' b m r
+forM = flip S.mapM
+
+-- | Decorate the input stream with a sequence number.
+number :: (Monad m, Num i, Enum i) => Stream' a m r -> Stream' (i, a) m r
+number = S.zip (S.iterate succ 0)
 
 -- | Extract out key/value pairs from the input stream, then
 -- group by key and aggregate the values.
@@ -269,7 +164,7 @@ mapM_ f = loop
 -- NOTE: This implementation avoids the slow performing @S.concat@.
 aggregateByKey
     :: (Monad m, Eq k, Monoid v, Functor f, Foldable f)
-    => (a -> f (k, v))      -- ^ function to extract key/value pairs
+    => (a -> f (k, v))      -- ^ function to extract key/value pairs -- TODO move this function out?
     -> Stream' a m r        -- ^ input stream
     -> Stream' (k, v) m r   -- ^ output stream of key/value pairs
 aggregateByKey f =
@@ -289,3 +184,42 @@ instance (MonadThrow m, Functor f) => MonadThrow (Stream f m) where
 
 instance (MonadResource m, Functor f) => MonadResource (Stream f m) where
     liftResourceT = lift . liftResourceT
+
+
+-- | A simple parMap that reads ahead submitting concurrent tasks.
+--
+-- NOTE: Since we force the effects using the supplied buffer size,
+-- the interleaving between output events and effects will be changed.
+-- This is especially important to consider when the governing monad
+-- is itself used to hold another stream of values which are interleaved
+-- with the supplied stream.
+parMap
+    :: MonadIO m
+    => Natural     -- ^ read-ahead buffer size
+    -> Executor    -- ^ thread pool
+    -> (a -> IO b)
+    -> Stream' a m r
+    -> Stream' b m r
+parMap n e f
+    = S.mapM (liftIO . Executor.futureWait)
+    . evaluate n
+    . S.mapM (liftIO . Executor.submit e . f)
+
+-- | Evaluates the stream (forces the effects) ahead by @n@ items.
+evaluate :: forall a m r. Monad m => Natural -> Stream' a m r -> Stream' a m r
+evaluate n = buffer mempty
+  where
+    buffer !buf str = do
+      e <- lift $ next str
+      case e of
+        Left r -> do
+          S.each buf -- yield remaining
+          return r
+        Right (a,rest) ->
+          case Seq.viewl buf of
+            -- yield buffer head, only if buffer is full
+            a' Seq.:< _ | Seq.length buf >= fromIntegral n -> do
+              yield a'
+              buffer (Seq.drop 1 buf Seq.|> a) rest
+            _           ->
+              buffer (buf Seq.|> a) rest

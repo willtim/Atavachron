@@ -2,7 +2,6 @@ module Main where
 
 import qualified Crypto.Saltine as Saltine
 
-import Data.Semigroup ((<>))
 import Data.Text (Text)
 import Options.Applicative
 
@@ -230,7 +229,7 @@ main = do
                ( fullDesc
                  <> header (unwords [ "Atavachron"
                                     , showVersion version
-                                    , "© 2018-2019 Tim Philip Williams"
+                                    , "© 2018-2020 Tim Philip Williams"
                                     ]))
     withStdoutLogging $ do
         setLogLevel (optLogLevel options)

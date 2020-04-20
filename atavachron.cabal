@@ -1,5 +1,5 @@
 Name:            atavachron
-Version:         0.1.3.2
+Version:         0.2.0.0
 Cabal-Version:   >= 1.10
 License:         GPL-3
 License-File:    LICENSE
@@ -17,22 +17,22 @@ Source-Repository head
   Type: git
   Location: https://github.com/willtim/Atavachron
 
-Library
+Executable atavachron
+  Main-Is:         Main.hs
   Hs-Source-Dirs:  src
   Default-Language: Haskell2010
   if impl(ghc < 8.0)
    Build-Depends:  semigroups >= 0.18.5 && < 0.19
   Build-Depends:
         Glob                              >= 0.9.3 && < 0.10,
-        QuickCheck                        >= 2.11.3 && < 2.13,
+        QuickCheck                        >= 2.11.3 && < 2.14,
         async                             >= 2.2.1 && < 2.3,
         attoparsec                        >= 0.13.2 && < 0.14,
-        aws                               >= 0.21 && < 0.22,
+        aws                               >= 0.21 && < 0.23,
         base                              >= 4.11.1 && < 5,
         base16-bytestring                 >= 0.1.1 && < 0.2,
         binary                            >= 0.8.5 && < 0.9,
         bytestring                        >= 0.10.8 && < 0.11,
-        bzlib                             >= 0.5.0 && < 0.6,
         conduit                           >= 1.3.1 && < 1.4,
         conduit-extra                     >= 1.3.0 && < 1.4,
         containers                        >= 0.5.11 && < 0.7,
@@ -41,29 +41,29 @@ Library
         exceptions                        >= 0.10.0 && < 0.11,
         expresso                          >= 0.1.1 &&  < 0.2,
         filepath                          >= 1.4.2 && < 1.5,
-        hashable                          >= 1.2.7 && < 1.3,
+        hashable                          >= 1.2.7 && < 1.4,
         hostname                          >= 1.0 && < 1.1,
         http-client                       >= 0.5.14 && < 0.6,
         http-conduit                      >= 2.3.2 && < 2.4,
         http-types                        >= 0.12.2 && < 0.13,
         ini                               >= 0.3.6 && < 0.4,
-        lens                              >= 4.16.1 && < 5,
         fast-logger                       >= 2.4.13 && < 2.5,
         lz4                               >= 0.2.3 && < 0.3,
         mmorph                            >= 1.1.2 && < 1.2,
         mtl                               >= 2.2.2 && < 2.3,
-        optparse-applicative              >= 0.14.3 && < 0.15,
+        optparse-applicative              >= 0.14.3 && < 0.16,
         parsec                            >= 3.1.13 && < 3.2,
         random                            >= 1.1 && < 1.2,
         resourcet                         >= 1.2.2 && < 1.3,
         saltine                           >= 0.1.0 && < 0.2,
         scrypt                            >= 0.5.0 && < 0.6,
         serialise                         >= 0.2.1 && < 0.3,
+        stm                               >= 2.5.0 && < 3.0,
         streaming                         >= 0.2.2 && < 0.3,
         tasty-quickcheck                  >= 0.10 && < 0.11,
-        template-haskell                  >= 2.13.0 && < 2.15,
+        template-haskell                  >= 2.13.0 && < 2.16,
         text                              >= 1.2.3 && < 1.3,
-        time                              >= 1.8.0 && < 1.9,
+        time                              >= 1.8.0 && < 2.0,
         time-locale-compat                >= 0.1.1.5 && < 1.2,
         transformers                      >= 0.5.5 && < 0.6,
         transformers-base                 >= 0.4.5 && < 0.5,
@@ -71,57 +71,9 @@ Library
         unordered-containers              >= 0.2.9 && < 0.3,
         uri-encode                        >= 1.5.0 && < 1.6,
         vector                            >= 0.12.0 && < 0.13,
-        wl-pprint                         >= 1.2.1 && < 1.3
+        wl-pprint                         >= 1.2.1 && < 1.3,
+        zlib                              >= 0.6   && < 0.7
 
-  Exposed-Modules: Atavachron.Path
-                 , Atavachron.Env
-                 , Atavachron.Tree
-                 , Atavachron.Commands
-                 , Atavachron.Config
-                 , Atavachron.Pipelines
-                 , Atavachron.Garbage
-                 , Atavachron.Prune
-                 , Atavachron.Repository
-                 , Atavachron.Files
-                 , Atavachron.IO
-                 , Atavachron.Logging
-                 , Atavachron.Streaming
-                 , Atavachron.Chunk.CDC
-                 , Atavachron.Chunk.Encode
-                 , Atavachron.Chunk.Builder
-                 , Atavachron.Chunk.Cache
-                 , Atavachron.Store
-                 , Atavachron.Store.S3
-                 , Atavachron.Store.LocalFS
-                 , Atavachron.Chunk.Tests
-
-  ghc-options: -O2 -Wall -g
-               -funbox-strict-fields
-               -fwarn-tabs
-               -fno-warn-orphans
-               -fno-warn-unused-do-bind
-               -fno-warn-name-shadowing
---               -fprof-auto
---               -fprof-cafs
-
-Executable atavachron
-  Main-Is:         Main.hs
-  Buildable: True
-  Hs-Source-Dirs:  src
-  Default-Language: Haskell2010
-  if impl(ghc < 8.0)
-   Build-Depends:  semigroups
-  Build-Depends:   base, containers, hashable, mtl, parsec, wl-pprint,
-                   unordered-containers, directory, filepath, random,
-                   time, time-locale-compat, text, streaming, unix, exceptions, bytestring,
-                   resourcet, async, vector, binary, transformers,
-                   saltine, direct-sqlite, optparse-applicative,
-                   serialise, fast-logger, lz4, hostname, lens, bzlib,
-                   aws >= 0.21, ini, conduit, conduit-extra, http-conduit,
-                   http-client, http-types, attoparsec, mmorph,
-                   transformers-base, Glob, uri-encode, scrypt,
-                   QuickCheck, tasty-quickcheck, expresso, template-haskell,
-                   base16-bytestring
   Other-Modules:   Atavachron.Path
                  , Atavachron.Env
                  , Atavachron.Tree
@@ -138,12 +90,18 @@ Executable atavachron
                  , Atavachron.Chunk.CDC
                  , Atavachron.Chunk.Encode
                  , Atavachron.Chunk.Builder
-                 , Atavachron.Chunk.Cache
+                 , Atavachron.Executor
+                 , Atavachron.DB
+                 , Atavachron.DB.MMap
+                 , Atavachron.DB.MSet
                  , Atavachron.Store
                  , Atavachron.Store.S3
                  , Atavachron.Store.LocalFS
-                 , Paths_atavachron
 
+                 , Atavachron.DB.Field
+                 , Atavachron.DB.Connection
+                 , Atavachron.Chunk.Tests
+                 , Paths_atavachron
 
   ghc-options: -O2 -g -threaded -rtsopts -with-rtsopts=-N -Wall
                -funbox-strict-fields

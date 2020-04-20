@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 -- | Simple and efficient content-derived chunking (CDC) using
 -- hashing by Cyclic Polynomials (also known as Buzhash).
@@ -113,7 +113,7 @@ rechunkCDC cdcKey CDCParams{..} = loop mempty Nothing
                                   return $ fromByteString remChunk remTags
         case res of
             Left r      -> do -- yield last leftover, if necessary
-                when (bSize builder' > 0 || length (bTaggedOffsets builder') > 0) $
+                when (bSize builder' > 0 || not (null $ bTaggedOffsets builder')) $
                     yield $ RawChunk (bTaggedOffsets builder') (toByteString builder')
                 return r
             Right str'  ->    -- continue
@@ -152,7 +152,7 @@ split hvs winSize minSize log2AvgSize bs
         | start >= end = (bs, B.empty)
     loop !start !hash
         | let !i = start + winSize
-        , (mask == (hash .&. mask) && i >= minSize) = B.splitAt i bs
+        , mask == (hash .&. mask) && i >= minSize = B.splitAt i bs
     loop !start !hash =
        let !old8  = B.unsafeIndex bs start
            !new8  = B.unsafeIndex bs (start + winSize)

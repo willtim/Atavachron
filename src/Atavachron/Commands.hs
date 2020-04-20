@@ -1,6 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -9,11 +6,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -fno-full-laziness #-}
 
 -- |  High-level commands exposed to the command-line interface.
 --
@@ -27,12 +23,13 @@ import Control.Exception
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Reader
-import Control.Monad.State.Strict
 import Control.Monad.Trans.Resource
 
+import qualified Data.ByteString.Short as SB
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.List as List
 import qualified Data.Map as Map
+import Data.IORef
 import Data.Maybe
 import Data.Ord
 import Data.Text (Text)
@@ -49,8 +46,8 @@ import Text.Printf
 
 import qualified Streaming.Prelude as S (each, map, toList_)
 import System.FilePath.Glob
-import System.Posix.Process (getProcessID)
 import Network.HostName (getHostName)
+import qualified Network.URI.Encode as URI
 import qualified System.Directory as Dir
 import qualified System.Posix.Files as Files
 
@@ -64,8 +61,7 @@ import Atavachron.Garbage
 import Atavachron.Repository ( Repository(..), Snapshot(..)
                              , SnapshotName, CachedCredentials)
 import Atavachron.Store (Store)
-import Atavachron.Streaming (mkTaskGroup)
-import Atavachron.Tree (FileMeta(..), Diff(..), filterItems)
+import Atavachron.Tree (FileMeta(..), Diff(..), extractFileItem)
 import qualified Atavachron.Prune as Prune
 import qualified Atavachron.Repository as Repository
 import qualified Atavachron.Store as Store
@@ -321,17 +317,16 @@ diff DiffOptions{..} mcfg = do
     snap1     <- getSnapshot repo snapshotID1
     snap2     <- getSnapshot repo snapshotID2
     runResourceT
-        . flip evalStateT initialProgress
         . flip runReaderT env
         . S.mapM_ (liftIO . printDiff)
-        $ Tree.diff fst fst (S.lefts $ snapshotTree snap1)
-                            (S.lefts $ snapshotTree snap2)
+        $ Tree.diff id id (filterItems extractFileItem $ snapshotTree snap1)
+                          (filterItems extractFileItem $ snapshotTree snap2)
   where
     printDiff = \case
-        Keep   _        -> return () -- don't print
-        Insert (item,_) -> getFilePath (filePath item) >>= putStrLn . ("+ "<>)
-        Change (item,_) -> getFilePath (filePath item) >>= putStrLn . ("c "<>)
-        Delete (item,_) -> getFilePath (filePath item) >>= putStrLn . ("- "<>)
+        Keep   _ _    -> return () -- don't print
+        Insert   item -> getFilePath (filePath item) >>= putStrLn . ("+ "<>)
+        Change _ item -> getFilePath (filePath item) >>= putStrLn . ("c "<>)
+        Delete   item -> getFilePath (filePath item) >>= putStrLn . ("- "<>)
 diff DiffOptionsProfile{..} mcfg = do
     p <- getProfile profileName mcfg
     diff (DiffOptions{repoURL = profileLocation p
@@ -417,9 +412,9 @@ listSnapshots repoURL source = do
                 Right snap -> (key, snap))
         $ stream
 
-    if (null snapshots)
+    if null snapshots
        then putStrLn "No snapshots found."
-       else flip mapM_ snapshots $ \(key, snap) ->
+       else forM_ snapshots $ \(key, snap) ->
                 liftIO (printSnapshotRow key snap)
   where
     compareKey Snapshot{..} = (sHostName, sHostDir, sUserName, Down sStartTime)
@@ -431,14 +426,13 @@ listFiles mcfg repoURL partialKey globs = do
     env   <- makeEnv mcfg repo rootDir globs
     snap  <- liftIO $ getSnapshot repo partialKey
     runResourceT
-        . flip evalStateT initialProgress
         . flip runReaderT env
         . S.mapM_ (liftIO . printFile)
-        . S.lefts
-        . filterItems fst
+        . filterItems extractFileItem
+        . filterWithEnvPredicate
         $ snapshotTree snap
   where
-    printFile (item, {-Repository.ChunkList chunks-} _) = do
+    printFile item = do
         -- print out as a relative path, i.e. without the leading '/'.
         fp <- getFilePath (relativise rootDir $ filePath item)
         putStrLn fp
@@ -464,7 +458,9 @@ addAccessKey repoURL name = do
 
 runBackup :: Maybe Config -> Repository -> Path Abs Dir -> FileGlobs -> Bool -> IO ()
 runBackup mcfg repo sourceDir globs forceFullScan' = do
+    logInfo "Starting backup ..."
     env      <- makeEnv mcfg repo sourceDir globs
+
     -- read the last snapshot written and check that it still exists, if it doesn't
     -- force a full scan, since we cannot use the files cache.
     mLastKey      <- runReaderT readLastSnapshotKey env
@@ -472,7 +468,7 @@ runBackup mcfg repo sourceDir globs forceFullScan' = do
         case mLastKey of
             Just key | not forceFullScan' -> do
                 haveLastSnap <- Repository.doesSnapshotExist repo key
-                when (not haveLastSnap) $
+                unless haveLastSnap $
                     logWarn $ "Could not find previous snapshot '" <> key <> "', forcing full scan."
                 return $ not haveLastSnap
             Nothing  | not forceFullScan' -> return True -- full scan if no previous key
@@ -480,26 +476,23 @@ runBackup mcfg repo sourceDir globs forceFullScan' = do
 
     snapshot <-
         runResourceT
-          . flip evalStateT initialProgress
           . flip runReaderT env
-          $ backupPipeline forceFullScan sourceDir
+          $ backupPipeline sourceDir forceFullScan
 
     res <- Repository.putSnapshot repo snapshot
     case res of
         Left ex   -> panic $ "Failed to write snapshot: " <> T.pack (show ex)
         Right key -> do
-            retainProgress
             logInfo $ "Wrote snapshot " <> T.take 8 key
-            flip runReaderT env $
-                commitFilesCache >> writeLastSnapshotKey key >> cleanUpTempFiles
+            flip runReaderT env $ writeLastSnapshotKey key
     logInfo "Backup complete."
 
 
 runVerify :: Maybe Config -> Repository -> Snapshot -> FileGlobs -> IO ()
 runVerify mcfg repo snapshot globs = do
+    logInfo "Starting verify ..."
     env <- makeEnv mcfg repo rootDir globs
     runResourceT
-        . flip evalStateT initialProgress
         . flip runReaderT env
         . S.mapM_ logFailed -- for now, just log files with errors
         $ verifyPipeline snapshot
@@ -509,51 +502,57 @@ runVerify mcfg repo snapshot globs = do
     logFailed (item, VerifyResult errors) =
         unless (null errors) $ do
             path <- liftIO $ getFilePath (filePath item)
-            logWarn $ "File has errors: " <> (T.pack path)
+            logWarn $ "File has errors: " <> T.pack path
 
 runRestore :: Maybe Config -> Repository -> Snapshot -> Path Abs Dir -> FileGlobs -> IO ()
 runRestore mcfg repo snapshot targetDir globs = do
+    logInfo "Starting restore ..."
     env <- makeEnv mcfg repo targetDir globs
+    targetExists <- Dir.doesDirectoryExist =<< getFilePath targetDir
+    unless targetExists $
+        panic "The target directory does not exist!"
     runResourceT
-        . flip evalStateT initialProgress
         . flip runReaderT env
-        $ restoreFiles snapshot
+        $ restorePipeline snapshot
     retainProgress
     logInfo "Restore complete."
 
 runCheckChunks :: Maybe Config -> URL -> IO ()
 runCheckChunks mcfg repoURL = do
+    logInfo "Starting check chunks ..."
     runChunksProc mcfg repoURL chunkCheck
     logInfo "Chunks check complete."
 
 runRepairChunks :: Maybe Config -> URL -> IO ()
 runRepairChunks mcfg repoURL = do
+    logInfo "Starting chunks repair ..."
     runChunksProc mcfg repoURL chunkRepair
     logInfo "Chunks repair complete."
 
 runExhaustiveGC :: Maybe Config -> URL -> IO ()
 runExhaustiveGC mcfg repoURL = do
+    logInfo "Starting exhaustive GC ..."
     runChunksProc mcfg repoURL $ \repo -> collectGarbage repo Nothing
     logInfo "Exhaustive GC complete."
 
 runDeleteGarbage :: Maybe Config -> URL -> IO ()
 runDeleteGarbage mcfg repoURL = do
+    logInfo "Starting garbage deletion ..."
     runChunksProc mcfg repoURL deleteGarbage
     logInfo "Garbage deletion complete."
 
 runChunksProc
   :: Maybe Config
   -> URL
-  -> (Repository -> ReaderT Env (StateT Progress (ResourceT IO)) ())
+  -> (Repository -> ReaderT Env (ResourceT IO) ())
   -> IO ()
 runChunksProc mcfg repoURL m = do
     store <- parseURL'    repoURL
     repo  <- authenticate store
     env   <- makeEnv mcfg repo rootDir noFileGlobs
     runResourceT
-        . flip evalStateT initialProgress
         . flip runReaderT env
-        $ m repo >> cleanUpTempFiles
+        $ m repo
 
 runPrune
     :: Maybe Config
@@ -563,6 +562,7 @@ runPrune
     -> Bool
     -> IO ()
 runPrune mcfg repo source settings dryRun = do
+    logInfo "Starting prune ..."
     env <- makeEnv mcfg repo rootDir noFileGlobs
     let stream = maybe (Repository.listSnapshots repo)
                        (Repository.listSnapshotsForSource repo)
@@ -579,7 +579,7 @@ runPrune mcfg repo source settings dryRun = do
     -- group by (host, path) and apply prune seperately to each distinct group
     let snapshotGroups
             = Map.toList
-            . Map.map (Map.fromList)
+            . Map.map Map.fromList
             $ foldr (uncurry $ Map.insertWith (++)) mempty
                 [ ((sHostName, sHostDir), [(k, s)])
                 | (k, s@Snapshot{..}) <- snapshotsAll]
@@ -596,7 +596,7 @@ runPrune mcfg repo source settings dryRun = do
             putStrLn $ "Deletions" <> if dryRun then " (proposed):" else ":"
             mapM_ (uncurry printSnapshotRow) $ Map.toList deletions
 
-        when (not dryRun) $ do
+        unless dryRun $ do
             -- Delete snapshots
             forM_ (Map.elems deletions) $ \snapshot -> do
                 e <- Repository.deleteSnapshot repo snapshot
@@ -607,12 +607,10 @@ runPrune mcfg repo source settings dryRun = do
 
             -- Incremental Garbage collection
             runResourceT
-                . flip evalStateT initialProgress
                 . flip runReaderT env
                 $ collectGarbage repo (Just . toStream $ deletions)
-                    >> cleanUpTempFiles
 
-    logInfo $ "Prune complete."
+    logInfo "Prune complete."
   where
     prefix | dryRun    = "DRY RUN: "
            | otherwise = ""
@@ -636,38 +634,42 @@ newCredentials store = do
 loadCredentials :: Text -> IO (Maybe CachedCredentials)
 loadCredentials urlText = do
     cachePath <- getCachePath
-    filePath  <- mkCacheFileName cachePath urlText "credentials" >>= getFilePath
+    filePath  <- genFileName cachePath urlText "credentials" >>= getFilePath
     exists    <- Files.fileExist filePath
     if exists
-        then do logDebug $ "Using cached credentials."
+        then do logDebug "Using cached credentials."
                 Just . deserialise <$> LB.readFile filePath
         else    return Nothing
 
 saveCredentials :: Text -> CachedCredentials -> IO ()
 saveCredentials urlText cc = do
     cachePath <- getCachePath
-    filePath  <- mkCacheFileName cachePath urlText "credentials" >>= getFilePath
+    filePath  <- genFileName cachePath urlText "credentials" >>= getFilePath
     LB.writeFile filePath (serialise cc)
     Files.setFileMode filePath (Files.ownerReadMode `Files.unionFileModes` Files.ownerWriteMode)
     T.putStrLn $ "Credentials cached at " <> T.pack filePath
 
+genFileName :: Path Abs Dir -> Text -> RawName -> IO (Path Abs File)
+genFileName cachePath repoURL name = do
+    let dir = pushDir cachePath (SB.toShort . T.encodeUtf8 . URI.encodeText $ repoURL)
+    Dir.createDirectoryIfMissing True =<< getFilePath dir
+    return $ makeFilePath dir name
+
 makeEnv :: Maybe Config -> Repository -> Path Abs Dir -> FileGlobs -> IO Env
 makeEnv mcfg repo localDir globs = do
-    logDebug $ "Available cores: " <> T.pack (show numCapabilities)
+    logInfo $ "Detected cores: " <> T.pack (show numCapabilities)
     startT      <- getCurrentTime
+    progressRef <- newIORef mempty
 
     -- default to a conservative size to minimise memory usage.
-    let taskBufferSize = maybe numCapabilities fromIntegral
+    let taskBufferSize = maybe (fromIntegral $ 2 * numCapabilities) fromIntegral
                        $ getOverride configTaskBufferSize
 
-    taskGroup   <- mkTaskGroup
-                 . maybe numCapabilities fromIntegral
-                 $ getOverride configTaskThreads
+        taskGroup      = maybe (fromIntegral numCapabilities) fromIntegral
+                       $ getOverride configTaskThreads
 
     cachePath   <- maybe getCachePath parseAbsDir'
                  $ getOverride configCachePath
-
-    tempPath    <- getTempDir
 
     let garbageExpiryDays
                  = maybe 30 fromIntegral
@@ -677,14 +679,14 @@ makeEnv mcfg repo localDir globs = do
          { envRepository        = repo
          , envStartTime         = startT
          , envTaskBufferSize    = taskBufferSize
-         , envTaskGroup         = taskGroup
+         , envTaskGroup         = taskGroup -- TODO rename
          , envRetries           = maybe 5 fromIntegral $ configMaxRetries <$> mcfg
          , envCachePath         = cachePath
-         , envTempPath          = tempPath
          , envFilePredicate     = parseGlobs globs
          , envDirectory         = localDir
-         , envBackupBinary      = fromMaybe False $ configBackupBinary <$> mcfg
+         , envBackupBinary      = maybe False configBackupBinary mcfg
          , envGarbageExpiryDays = garbageExpiryDays
+         , envProgressRef       = progressRef
          }
   where
       getOverride :: (Config -> Overridable a) -> Maybe a
@@ -700,7 +702,7 @@ getCachePath =
 parseSource :: Text -> IO (Text, Path Abs Dir)
 parseSource sourceDir = (,)
     <$> (T.pack <$> getHostName)
-    <*> (parseAbsDir' sourceDir)
+    <*> parseAbsDir' sourceDir
 
 -- | Logs and throws, if it cannot parse the path.
 parseAbsDir' :: Text -> IO (Path Abs Dir)
@@ -708,20 +710,6 @@ parseAbsDir' t =
     case parseAbsDir (T.unpack t) of
         Nothing   -> panic $ "Cannot parse absolute path: " <> t
         Just path -> return path
-
--- | Return a temporary directory inside the appropriate place which
--- incorporates the process name.
-getTempDir :: IO (Path Abs Dir)
-getTempDir = do
-    fp  <- Dir.getTemporaryDirectory
-    case parseAbsDir fp of
-        Nothing   -> panic $ "Cannot parse system-provided temporary path: " <> (T.pack fp)
-        Just path -> do
-            pid <- T.encodeUtf8 . T.pack . show <$> getProcessID
-            let tmpDir = foldl pushDir path [T.encodeUtf8 "atavachron", pid]
-            fp  <- getFilePath tmpDir
-            logDebug $ "Using temporary directory: " <> T.pack fp
-            return tmpDir
 
 -- | Logs and throws, if it cannot retrieve the snapshot
 getSnapshot :: Repository -> Text -> IO Snapshot
@@ -754,8 +742,7 @@ parseGlobs FileGlobs{..} = FilePredicate $ \path ->
                 | otherwise         = disjunction $ map parseGlob excludeGlobs
 
 parseGlob :: Text -> FilePredicate
-parseGlob g = FilePredicate $ \path ->
-        match patt <$> getFilePath path
+parseGlob g = FilePredicate $ fmap (match patt) . getFilePath
   where
     patt | "/" `T.isPrefixOf` g = panic $ "File path glob pattern must be relative not absolute: " <> g
          | otherwise = simplify $ compile $ T.unpack g
@@ -764,12 +751,11 @@ parseGlob g = FilePredicate $ \path ->
 parseURL :: URL -> IO (Either Text Store)
 parseURL URL{..} =
     case "://" `T.breakOn` urlText of
-        ("file",  T.unpack . T.drop 3 -> rest) -> do
-            m'path <- return $ parseAbsDir rest
-            return $ case m'path of
+        ("file",  T.unpack . T.drop 3 -> rest) ->
+            return $ case parseAbsDir rest of
                 Nothing   -> Left $ "Cannot parse file URL: " <> urlText
                 Just path -> Right $ Store.newLocalFS urlText path
-        ("s3", T.drop 3 -> rest) -> do
+        ("s3", T.drop 3 -> rest) ->
             case Store.parseS3URL rest of
                 Nothing   ->
                     return $ Left $ "Cannot parse S3 URL: " <> urlText

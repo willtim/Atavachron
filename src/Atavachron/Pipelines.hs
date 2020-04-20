@@ -1,3 +1,5 @@
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -8,6 +10,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 -- | Stream pipelines for backup, restore, verify etc.
 --
@@ -15,23 +18,23 @@
 module Atavachron.Pipelines where
 
 import Prelude hiding (concatMap)
-import Control.Arrow ((+++), (&&&))
-import Control.Lens (over)
+
+import Codec.Serialise
+
+import Control.Arrow ((+++),first,second)
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Control.Monad.Morph
-import Control.Monad.Fail
 import Control.Monad.Reader.Class
-import Control.Monad.State.Class
 import Control.Monad.Trans.Resource
 
 import Data.Function (on)
 
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Lazy as LB
-import Data.Text (Text)
+import qualified Data.ByteString.Short as SB
+import Data.Int
+import Data.IORef
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
@@ -39,7 +42,6 @@ import Data.Time.Clock
 
 import qualified Data.List as List
 
-import Data.Semigroup (Semigroup(..))
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 
@@ -47,17 +49,16 @@ import Streaming (Stream, Of(..))
 import Streaming.Prelude (yield)
 import qualified Streaming as S
 import qualified Streaming.Prelude as S hiding (mapM_)
-import qualified Streaming.Internal as S (concats)
 
 import qualified System.Posix.User as User
 import qualified System.Directory as Dir
 
+import Numeric.Natural
 import Network.HostName (getHostName)
 import qualified Network.URI.Encode as URI
 
 import Atavachron.Repository
 import Atavachron.Chunk.Builder
-import qualified Atavachron.Chunk.Cache as ChunkCache
 import qualified Atavachron.Chunk.CDC as CDC
 import Atavachron.Chunk.Encode
 
@@ -65,140 +66,249 @@ import Atavachron.IO
 import Atavachron.Logging
 import Atavachron.Path
 
-import Atavachron.Streaming (Stream', StreamF)
+import Atavachron.Streaming (Stream')
 import qualified Atavachron.Streaming as S
 
 import Atavachron.Env
+import qualified Atavachron.Executor as Executor
 import Atavachron.Tree
 import Atavachron.Files
 
+import qualified Atavachron.DB.MMap as MMap
+import qualified Atavachron.DB.MSet as MSet
+import Atavachron.DB.MMap (MMap)
+import Atavachron.DB.MSet (MSet)
+import Atavachron.DB as DB
+
+
+type ItemID  = Int64
+type ChunkID = Int64
+
+type ItemsMap      = MMap ItemID (TreeEntry () Rel)
+type FileChunksMap = MMap ItemID ChunkList
+type TasksMap t    = MMap ChunkID (TaggedOffsets t, StoreID)
+type ChunksSet     = MSet StoreID
+type RestoreMap    = MMap ItemID (FileChunks Rel)
 
 ------------------------------------------------------------
 -- Pipelines
 
 -- | Full and incremental backup.
 backupPipeline
-    :: (MonadReader Env m, MonadState Progress m, MonadResource m, MonadFail m)
-    => Bool
-    -> Path Abs Dir
+    :: forall m. (MonadReader Env m, MonadMask m, MonadResource m)
+    => Path Abs Dir
+    -> Bool
     -> m Snapshot
-backupPipeline forceFullScan
-    = makeSnapshot
-    . uploadPipeline
-    . serialiseTree
-    . overFileItems fst
-          ( writeFilesCache
-          . overChangedFiles (uploadPipeline . readFiles)
-          . diff fst id previousFiles
-          )
-    . filterItems id
-    . recurseDir
-  where
-    previousFiles | forceFullScan = mempty
-                  | otherwise     = readFilesCache
+backupPipeline path forceFullScan = do
+    when forceFullScan $ logInfo "Forcing full scan."
+    cachePath <- genFilePath "cache.db"
+    -- NOTE: connecting takes an exclusive lock on the cache file.
+    (_, conn) <- allocate (DB.connect cachePath) DB.disconnect
+
+    -- Wrap the entire backup process in a transaction.
+    DB.withTx conn $ do
+
+      previousFiles <- readPreviousFiles conn forceFullScan
+
+      MMap.withEmptyMap conn "items" $ \(itemsMap    :: ItemsMap) ->
+        MMap.withEmptyMap conn "files" $ \(fileChunksMap :: FileChunksMap) -> do
+
+        -- upload chunks as we recurse the filesystem
+        logInfo "Uploading file chunks ..."
+
+        sourceDir <- asks envDirectory
+
+        -- NOTE: we save all items into a disk cache so that we can upload
+        -- chunks in any order.
+        uploadedStr <- uploadPipeline conn                -- upload chunks and then stream
+                     . readFiles                          -- read changed files from local filesystem
+                     . MMap.insertMany fileChunksMap      -- write unchanged file chunks
+                     . partitionDiff                      -- outer stream is unchanged, inner is changed
+                     . diff fst snd previousFiles         -- diff with previous files cache
+                     . filterItems (mapM extractFileItem) -- select only the file items from stream
+                     . MMap.insertMany itemsMap           -- save items into cache
+                     . relativePaths second snd sourceDir -- relativise paths before saving to disk
+                     . S.copy
+                     . S.number                           -- assign sequence number
+                     . filterWithEnvPredicate             -- filter out unwanted items
+                     $ recurseDir path                    -- recurse local filesystem
+
+        -- by this point upload is complete
+        MMap.insertMany fileChunksMap uploadedStr
+
+        -- writing metadata
+        logInfo "Uploading snapshot metadata ..."
+
+        -- stream through the entries again to make the snapshot
+        treeStr    <- uploadPipeline conn
+                    . serialiseTree
+                    . hoist liftIO
+                    . S.mapM (lookupChunkList fileChunksMap)
+                    $ MMap.toStream itemsMap
+
+        retainProgress
+        makeSnapshot treeStr
 
 -- | Verify files and their chunks.
 verifyPipeline
-    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
+    :: (MonadReader Env m, MonadThrow m, MonadIO m, MonadResource m)
     => Snapshot
     -> Stream' (FileItem, VerifyResult) m ()
 verifyPipeline
   = summariseErrors
   . downloadPipeline
-  . S.lefts
-  . filterItems fst
+  . filterItems extractChunkLists
+  . filterWithEnvPredicate
   . snapshotTree
 
 -- | Restore (using the FilePredicate in the environment).
-restoreFiles
-    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadResource m)
+restorePipeline
+    :: (MonadReader Env m, MonadThrow m, MonadMask m, MonadResource m)
     => Snapshot
     -> m ()
-restoreFiles
-  = saveFiles
-  . overFileItems rcTag
-        ( trimChunks
-        . rechunkToTags
-        . handleErrors
-        . downloadPipeline
-        )
-  . filterItems fst
-  . snapshotTree
+restorePipeline snapshot = do
+    cachePath <- genFilePath "cache.db"
+    sourceDir <- asks envDirectory
+    -- NOTE: connecting takes an exclusive lock on the cache file.
+    (_, conn) <- allocate (DB.connect cachePath) DB.disconnect
+
+    DB.withTx conn $
+
+      MMap.withEmptyMap conn "restore_tmp" $ \(restoreMap :: RestoreMap) -> do
+
+        logInfo "Downloading snapshot ..."
+
+        -- write file chunk lists into table
+        MMap.insertMany restoreMap
+          . relativePaths second snd sourceDir
+          . S.number
+          . saveOther               -- restore directories and links
+          . partitionEntries
+          . filterWithEnvPredicate
+          . snapshotTree
+          $ snapshot
+
+        logInfo "Downloading files ..."
+
+        -- download files (in parallel)
+        saveFiles
+          . trimChunks
+          . rechunkToTags
+          . handleErrors
+          . downloadPipeline
+          . hoist liftIO
+          . S.map unFileChunks
+          . absolutePaths id id sourceDir
+          $ MMap.elems restoreMap
+
+        -- clean-up cache
+        liftIO $ MMap.clear restoreMap
 
 -- | The complete upload pipeline: CDC chunking, encryption,
--- compression and upload to remote location.
+-- compression and upload to a remote location.
 uploadPipeline
-  :: forall m t r. (MonadReader Env m, MonadState Progress m, MonadResource m, Eq t, Show t)
-  => Stream' (RawChunk t B.ByteString) m r
-  -> Stream' (t, ChunkList) m r
-uploadPipeline str = do
-    env@Env{..} <- lift ask
+  :: forall m t. (MonadReader Env m, MonadResource m, MonadMask m, Serialise t, Eq t, Show t)
+  => DB.Connection
+  -> Stream' (RawChunk t B.ByteString) m ()
+  -> m (Stream' (t, ChunkList) m ())
+uploadPipeline conn str = do
+    env@Env{..} <- ask
     let Manifest{..} = repoManifest envRepository
-        parMap :: (a -> IO b) -> Stream' a m r -> Stream' b m r
-        parMap = S.parMap envTaskBufferSize envTaskGroup
-    packChunkLists
-        . progressMonitor . S.copy
-        . S.mergeEither
-        . withChunkCache $ \conn ->
-            sinkLeftIntoCache conn
-                . S.mapM (mapLeftM measure)
-                . parMap (mapLeftM $ storeChunk envRetries envRepository <=< encodeChunk env)
-                . S.mapM (dedupChunk conn) -- duplicates passed on the right
-                . parMap (\c -> return $! hashChunk mStoreIDKey c)
-                . rechunkCDC
-                $ str
-  where
-    sinkLeftIntoCache
-        :: forall a b. ChunkCache.Connection
-        -> StreamF (Either (a, StoreID) b) (Either (a, StoreID) b) m r
-    sinkLeftIntoCache conn = S.mapM_ sink . S.copy
-      where
-        sink = either (liftIO . ChunkCache.insert conn . snd) (const $ return ())
 
-    measure :: (CipherChunk t, Bool) -> m (TaggedOffsets t, StoreID)
-    measure (cc@Chunk{..}, isDuplicate) = do
-        unless isDuplicate $ do
-            measureStoredSize cc
-            measureDedupSize  cOriginalSize
-        return (cOffsets, cStoreID)
+    MSet.withEmptySet conn "chunks" $ \chunksSet ->  -- TODO re-use if switch set?
+        MMap.withEmptyMap conn "tasks" $ \(tasksMap :: TasksMap t) -> do
+
+            workers  <- liftIO $ Executor.new envTaskGroup envTaskBufferSize
+
+            -- render progress every 500ms
+            liftIO $ Executor.scheduleAtFixedRate workers 500 (progressMonitor env)
+
+            let upload = liftIO
+                       . Executor.submit_ workers
+                       . uploadTask env tasksMap chunksSet
+
+            -- Drain stream and create up to envTaskBufferSize pending tasks
+            _ <-    S.mapM_ upload -- blocks if queue is full
+                  . S.number
+                  . rechunkCDC env
+                  $ str
+
+            logDebug "Waiting for workers ..."
+
+            liftIO $ Executor.shutdownAndWait workers
+
+            logDebug "Packing chunk lists ..."
+
+            -- we need to stream through the results in-order and run
+            -- it though "packChunkLists" to get the stream of ChunkLists.
+            return $
+                packChunkLists . S.map snd
+                               $ allocate (liftIO $ MMap.open conn "tasks") (liftIO . MMap.close)
+                                     >>= \(_, m :: TasksMap t) -> hoist liftIO $ MMap.toStream m
+  where
+    uploadTask
+        :: Env
+        -> TasksMap t
+        -> ChunksSet
+        -> (ChunkID, RawChunk (TaggedOffsets t) B.ByteString)
+        -> IO ()
+    uploadTask env@Env{..} tasksMap chunksSet (i, rawChunk) = do
+        let Manifest{..}  = repoManifest envRepository
+        let !pc@Chunk{..} = hashChunk mStoreIDKey rawChunk
+        -- query chunk set
+        isDup <- liftIO $ MSet.member chunksSet cStoreID
+        if isDup
+            then
+                void $ updateProgress envProgressRef (mempty{prChunks=1
+                                                            ,prInputSize=sizeOf pc})
+            else do
+                cc    <- encodeChunk env pc
+                isDup <- storeChunk envRetries envRepository cc
+                void $ updateProgress envProgressRef  (measure isDup cc)
+        MMap.insert tasksMap i (cOffsets, cStoreID)
+
+    measure :: Bool -> CipherChunk t -> Progress
+    measure isDup cc@Chunk{..} =
+        mempty { prChunks     = 1
+               , prInputSize  = maybe 0 fromIntegral cOriginalSize
+               , prStoredSize = if isDup then 0 else storedSize cc
+               , prDedupSize  = if isDup then 0 else maybe 0 fromIntegral cOriginalSize
+               }
+
+    sizeOf  = fromIntegral . B.length . cContent
+
 
 -- | A download pipeline that does not abort on errors.
 downloadPipeline
-    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
-    => Stream' (FileItem, ChunkList) m ()
-    -> Stream' (Either (Error FileItem) (PlainChunk FileItem)) m ()
-downloadPipeline
-    = progressMonitor . S.copy
-    . downloadChunks
-    . unpackChunkLists
+    :: (MonadReader Env m, MonadThrow m, MonadIO m, MonadResource m, Eq t, Show t)
+    => Stream' (t, ChunkList) m ()
+    -> Stream' (Either (Error t) (PlainChunk t)) m ()
+downloadPipeline str = do
+    env@Env{..}  <- lift ask
+    (_, workers) <- allocate (liftIO $ Executor.new envTaskGroup envTaskBufferSize)
+                             (liftIO . Executor.shutdown)
 
-downloadChunks
-    :: forall m t r. (MonadState Progress m, MonadReader Env m, MonadIO m, Show t)
-    => Stream' (TaggedOffsets t, StoreID) m r
-    -> Stream' (Either (Error t) (PlainChunk t)) m r
-downloadChunks str = do
-    Env{..} <- lift ask
-    let m@Manifest{..} = repoManifest envRepository
-        parMap :: (a -> IO b) -> Stream' a m r -> Stream' b m r
-        parMap = S.parMap envTaskBufferSize envTaskGroup
+    -- render progress every 500ms
+    liftIO $ Executor.scheduleAtFixedRate workers 500 (progressMonitor env)
 
-    S.mapM measure
-      . parMap (\e'c -> return $! (e'c >>= decodeChunk m >>= verifyChunk m))
-      . S.mapM (mapRightM $ \cc -> measureStoredSize cc >> return cc)
-      . parMap (retrieveChunk envRetries envRepository)
-      $ str
+    S.parMap envTaskBufferSize workers (downloadTask env)
+        . unpackChunkLists
+        $ str
   where
+    downloadTask Env{..} k = do
+        let m = repoManifest envRepository
+        e'cc <- retrieveChunk envRetries envRepository k
+        let !e'pc = e'cc >>= decodeChunk m >>= verifyChunk m
+        void $ updateProgress envProgressRef $ mempty
+            { prFiles     = either (const 0) offsets e'cc
+            , prChunks    = 1
+            , prInputSize = either (const 0) sizeOf e'pc
+            , prErrors    = either (const 1) (const 0) e'cc
+            }
+        return e'pc
 
-    -- to support the progress monitor
-    measure e'chunk = do
-        modify $ over prFiles     (+ fromIntegral (either (const 0) offsets e'chunk))
-               . over prChunks    (+ 1)
-               . over prInputSize (+ fromIntegral (either (const 0) sizeOf e'chunk))
-               . over prErrors    (+ either (const 1) (const 0) e'chunk)
-        return e'chunk
-
-    offsets c = length (cOffsets c)
-    sizeOf  c = B.length (cContent c)
+    offsets = fromIntegral . length . cOffsets
+    sizeOf  = fromIntegral . B.length . cContent
 
 -- | Decode a chunk, which may fail.
 decodeChunk
@@ -214,59 +324,95 @@ decodeChunk Manifest{..} cc =
 
 -- | Download and deserialise the tree.
 snapshotTree
-    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
+    :: (MonadReader Env m, MonadThrow m, MonadIO m, MonadResource m)
     => Snapshot
-    -> Stream' (Either (FileItem, ChunkList) OtherItem) m ()
+    -> Stream' (TreeEntry ChunkList Abs) m ()
 snapshotTree
     = deserialiseTree
     . rechunkToTags
-    . abortOnError downloadChunks
-    . unpackChunkLists
+    . abortOnError downloadPipeline
     . snapshotChunkLists
 
 -- | Collect all chunks for the supplied snapshot, including those
 -- comprising the actual snapshot tree itself.
 collectChunks
-    :: (MonadReader Env m, MonadState Progress m, MonadThrow m, MonadIO m)
+    :: (MonadReader Env m, MonadThrow m, MonadIO m, MonadResource m)
     => Snapshot
     -> Stream' StoreID m ()
 collectChunks snapshot
-    = (S.map snd . unpackChunkLists . S.lefts $ snapshotTree snapshot) <>
+    = (S.map snd . unpackChunkLists . filterItems extractChunkLists $ snapshotTree snapshot) <>
       (S.map snd . unpackChunkLists $ snapshotChunkLists snapshot)
-
-------------------------------------------------------------
--- Supporting stream transformers and utilities.
-
 
 -- | Real-time progress console output.
 -- NOTE: we write progress to stderr to get automatic flushing
 -- and to make it possible to use pipes over stdout if needed.
 progressMonitor
-    :: (MonadState Progress m, MonadReader Env m, MonadIO m)
-    => Stream' a m r
-    -> m r
-progressMonitor = S.mapM_ $ \_ -> do
-    Progress{..} <- get
-    startT       <- asks envStartTime
-    nowT         <- liftIO getCurrentTime
+    :: Env
+    -> IO ()
+progressMonitor Env{..} = do
+    let startT   = envStartTime
+    nowT         <- getCurrentTime
+    Progress{..} <- readIORef envProgressRef
     putProgress $ unwords $ List.intersperse " | "
-        [ "Files: "         ++ show _prFiles
-        , "Chunks: "        ++ show _prChunks
-        , "In: "            ++ show (_prInputSize  `div` megabyte) ++ " MB"
-        , "Out (dedup): "   ++ show (_prDedupSize  `div` megabyte) ++ " MB"
-        , "Out (stored):  " ++ show (_prStoredSize `div` megabyte) ++ " MB"
-        , "Rate: "          ++ show (rate _prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
-        , "Errors: "        ++ show _prErrors
+        [ "Files: "         ++ show prFiles
+        , "Chunks: "        ++ show prChunks
+        , "In: "            ++ show (prInputSize  `div` megabyte) ++ " MB"
+        , "Out (dedup): "   ++ show (prDedupSize  `div` megabyte) ++ " MB"
+        , "Out (stored):  " ++ show (prStoredSize `div` megabyte) ++ " MB"
+        , "Rate: "          ++ show (rate prInputSize (nowT `diffUTCTime` startT)) ++ " MB/s"
+        , "Errors: "        ++ show prErrors
         ]
   where
     rate bytes ndt = round $ toRational (bytes `div` megabyte) / toRational ndt :: Int
     megabyte = 1024*1024
 
+readPreviousFiles :: (MonadIO m, MonadReader Env m) => Connection -> Bool -> m (Stream' (FileItem, ChunkList) m ())
+readPreviousFiles conn forceFullScan
+    | forceFullScan = return mempty
+    | otherwise     = do
+          sourceDir <- asks envDirectory
+          liftIO $ do
+              DB.renameTable conn "items" "items_prev"
+              DB.renameTable conn "files" "files_prev"
+          -- NOTE: we must stream through all items in order to convert
+          -- out of relative paths (relative to the prior entry).
+          let str :: Stream' (TreeEntry () Rel, Maybe ChunkList) IO ()
+                   = MMap.leftOuterJoin conn "items_prev" "files_prev"
+          return . hoist liftIO
+                 . S.catMaybes
+                 . S.map extractChunkLists'
+                 . absolutePaths first fst sourceDir
+                 $ str
+  where
+    extractChunkLists' (FileEntry item (), Just chunks) = Just (item, chunks)
+    extractChunkLists' _ = Nothing
+
+lookupChunkList
+    :: FileChunksMap
+    -> (ItemID, TreeEntry () Rel)
+    -> IO (TreeEntry ChunkList Rel)
+lookupChunkList fileChunksMap (i, entry) =
+    case entry of
+        FileEntry item ()     -> do
+            mcl <- MMap.lookup fileChunksMap i
+            case mcl of
+                Nothing -> error "Upload task failed!" -- TODO how to propogate errors?
+                Just cl -> return $ FileEntry item cl
+        DirEntry item         -> return $ DirEntry item
+        LinkEntry item target -> return $ LinkEntry item target
+
+filterItems
+    :: Monad m
+    => (a -> Maybe b)
+    -> Stream' a m r
+    -> Stream' b m r
+filterItems f = S.catMaybes . S.map f
+
 -- | Report errors during restore and log affected files.
 -- Perhaps in the future we can record broken files and missing chunks
 -- then we can give them special names in saveFiles? For now, just abort.
 handleErrors
-    :: (MonadReader Env m, MonadState Progress m)
+    :: (MonadReader Env m)
     => Stream' (Either (Error FileItem) (PlainChunk FileItem)) m r
     -> Stream' (PlainChunk FileItem) m r
 handleErrors = S.mapM $ \case
@@ -276,52 +422,42 @@ handleErrors = S.mapM $ \case
             <> maybe mempty (T.pack . show) errCause
     Right chunk    -> return chunk
 
--- | Apply the supplied stream transform @f@ to the inserts
--- and changes only.
-overChangedFiles
+-- | Partition diff results into unchanged and changed files.
+-- The outer stream is the unchanged files, the inner the changed.
+partitionDiff
     :: forall m c r. Monad m
-    => StreamF FileItem (FileItem, c) (Stream (Of (FileItem, c)) m) r
-    -> Stream' (Diff (FileItem, c) FileItem) m r
-    -> Stream' (FileItem, c) m r
-overChangedFiles f
-   = S.mergeEither
-   . S.left fileElems fileElems f
+    => Stream' (Diff (FileItem, c) (ItemID, FileItem)) m r
+    -> Stream (Of (ItemID, c)) (Stream (Of (ItemID, FileItem)) m) r
+partitionDiff
+   = S.separate
+   . S.maps S.eitherToSum
    . fromDiffs
   where
-    fileElems = pathElems . filePath . fst
-
     -- Left values need the full chunk, encode, upload pipeline;
     -- Right values are unchanged and already have a chunk list.
     fromDiffs = S.catMaybes . S.map g
       where
-        g :: Diff (FileItem, c) FileItem
-          -> Maybe (Either FileItem (FileItem, c))
-        g (Keep x)   = Just $ Right x
-        g (Insert y) = Just $ Left y
-        g (Change y) = Just $ Left y
-        g (Delete _) = Nothing
+        g :: Diff (FileItem, c) (Int64, FileItem)
+          -> Maybe (Either (ItemID, c) (ItemID, FileItem))
+        g (Keep (_,c) (i,_)) = Just $ Left (i, c)
+        g (Insert y)         = Just $ Right y
+        g (Change _ y)       = Just $ Right y
+        g (Delete _)         = Nothing
 
--- | Separate out duplicate chunks.
--- Unseen chunks are passed on the left, known duplicates on the right.
--- Uses an on-disk persistent chunks cache for de-duplication.
-dedupChunk
-  :: (MonadReader Env m, MonadState Progress m, MonadResource m)
-  => ChunkCache.Connection
-  -> PlainChunk t
-  -> m (Either (PlainChunk t) (TaggedOffsets t, StoreID))
-dedupChunk conn c@Chunk{..} = do
-    -- collect some statistics
-    let chunkSize = B.length cContent
-    modify $ over prChunks    succ
-           . over prInputSize (+ fromIntegral chunkSize)
-    -- query chunk cache
-    isDuplicate <- liftIO $ ChunkCache.member conn cStoreID
-    if isDuplicate
-       then do -- duplicate
-           measureDedupSize (Just chunkSize)
-           return $ Right (cOffsets, cStoreID)
-       else
-           return $ Left c
+-- | Partition tree entries into "other" items (non-regular files) and file items.
+-- The outer stream is other items, the inner is file items.
+partitionEntries
+    :: forall m r. Monad m
+    => Stream' (TreeEntry ChunkList Abs) m r
+    -> Stream (Of OtherItem) (Stream (Of (FileChunks Abs)) m) r
+partitionEntries
+   = S.separate
+   . S.maps S.eitherToSum
+   . S.map fromTreeEntry
+  where
+    fromTreeEntry (FileEntry item chunks) = Right $ FileChunks (item, chunks)
+    fromTreeEntry (LinkEntry item target) = Left $ LinkItem item target
+    fromTreeEntry (DirEntry item)         = Left $ DirItem item
 
 -- | Compress and encrypt the supplied chunk.
 encodeChunk
@@ -337,8 +473,8 @@ encodeChunk Env{..}
 -- | Store a ciphertext chunk (likely an upload to a remote repo).
 -- NOTE: this throws a fatal error if it cannot successfully upload a
 -- chunk after exceeding the retry limit.
-storeChunk :: MonadIO m => Int -> Repository -> CipherChunk t -> m (CipherChunk t, Bool)
-storeChunk retries repo cc@Chunk{..} = liftIO $ do
+storeChunk :: MonadIO m => Natural -> Repository -> CipherChunk t -> m Bool
+storeChunk retries repo Chunk{..} = liftIO $ do
     res <- retryWithExponentialBackoff retries $ do
         logDebug $ "Storing chunk " <> T.pack (show cStoreID)
         putChunk repo cStoreID cContent
@@ -346,13 +482,13 @@ storeChunk retries repo cc@Chunk{..} = liftIO $ do
         Left (ex :: SomeException) ->
             panic $ "Failed to store chunk : " <> T.pack (show ex) -- fatal abort
         Right isDuplicate ->
-            return (cc, isDuplicate)
+            return isDuplicate
 
 -- | Retrieve a ciphertext chunk (likely a download from a remote repo).
 -- NOTE: we do not log errors here, instead we return them for aggregation elsewhere.
 retrieveChunk
     :: Show t
-    => Int
+    => Natural
     -> Repository
     -> (TaggedOffsets t, StoreID)
     -> IO (Either (Error t) (CipherChunk t))
@@ -365,39 +501,28 @@ retrieveChunk retries repo (offsets, storeID) = do
     mkError = Error RetrieveError offsets storeID . Just
 
 rechunkCDC
-  :: (MonadReader Env m, Eq t)
-  => Stream' (RawChunk t B.ByteString) m r
+  :: (Monad m, Eq t)
+  => Env
+  -> Stream' (RawChunk t B.ByteString) m r
   -> Stream' (RawChunk (TaggedOffsets t) B.ByteString) m r
-rechunkCDC str = asks (repoManifest . envRepository) >>= \Manifest{..} ->
-    CDC.rechunkCDC mCDCKey mCDCParams str
+rechunkCDC Env{..} = CDC.rechunkCDC mCDCKey mCDCParams
+  where
+    Manifest{..} = repoManifest envRepository
 
-writeFilesCache
-  :: (MonadReader Env m, MonadResource m)
-  => Stream' (FileItem, ChunkList) m r
-  -> Stream' (FileItem, ChunkList) m r
-writeFilesCache str = do
-    cacheFile <- genFilesCacheName "files.tmp" >>= resolveCacheFileName
-    sourceDir <- asks envDirectory
-    writeCacheFile cacheFile
-        . relativePaths sourceDir
-        . S.map (uncurry FileCacheEntry)
-        $ S.copy str
-
-readFilesCache
-  :: (MonadReader Env m, MonadResource m)
-  => Stream' (FileItem, ChunkList) m ()
-readFilesCache = do
-    cacheFile <- genFilesCacheName "files" >>= resolveCacheFileName
-    sourceDir <- asks envDirectory
-    S.map (ceFileItem &&& ceChunkList)
-        . absolutePaths sourceDir
-        $ readCacheFile cacheFile
+filterWithEnvPredicate
+    :: forall m c r. (MonadReader Env m, MonadIO m)
+    => Stream' (TreeEntry c Abs) m r
+    -> Stream' (TreeEntry c Abs) m r
+filterWithEnvPredicate str = do
+    predicate <- asks envFilePredicate
+    baseDir   <- asks envDirectory
+    filterWithPredicate predicate baseDir str
 
 readLastSnapshotKey
     :: (MonadReader Env m, MonadIO m)
     => m (Maybe SnapshotName)
 readLastSnapshotKey = do
-    fp <- genFilesCacheName "last_snapshot" >>= resolveCacheFileName'
+    fp <- genFilePath "last_snapshot" >>= liftIO . getFilePath
     liftIO $ do
         exists <- Dir.doesFileExist fp
         if exists
@@ -409,64 +534,24 @@ writeLastSnapshotKey
     => SnapshotName
     -> m()
 writeLastSnapshotKey key = do
-    fp <- genFilesCacheName "last_snapshot" >>= resolveCacheFileName'
+    fp <- genFilePath "last_snapshot" >>= liftIO . getFilePath
     liftIO $ T.writeFile fp key
 
--- Generate a file cache file name from the absolute path of the source directory.
-genFilesCacheName :: MonadReader Env m => RawName -> m RawName
-genFilesCacheName prefix = do
-    name  <- Builder.toLazyByteString . Builder.byteStringHex . getRawFilePath
-                 <$> asks envDirectory
-    return $ prefix <> "." <> LB.toStrict name
+-- | Generate a file path using repo url, source uri and the provided name.
+-- Creates the parent directories if they do not exist.
+genFilePath :: (MonadReader Env m, MonadIO m) => RawName -> m (Path Abs File)
+genFilePath name = do
+    cachePath <- asks envCachePath
+    srcPath   <- fmap T.pack . liftIO . getFilePath =<< asks envDirectory
+    repoURL'  <- asks (repoURL . envRepository)
 
--- NOTE: We only commit updates to the file cache if the entire backup completes.
-commitFilesCache :: (MonadIO m, MonadCatch m, MonadReader Env m) => m ()
-commitFilesCache = do
-    cacheFile  <- genFilesCacheName "files.tmp" >>= resolveCacheFileName'
-    cacheFile' <- genFilesCacheName "files" >>= resolveCacheFileName'
-    res <- try $ liftIO $ Dir.renameFile cacheFile cacheFile'
-    case res of
-        Left (ex :: SomeException) -> panic $ "Failed to update cache file: " <> T.pack (show ex)
-        Right () -> return ()
-
-resolveTempFileName
-    :: (MonadReader Env m, MonadIO m)
-    => RawName
-    -> m (Path Abs File)
-resolveTempFileName name = ask >>= \Env{..} -> liftIO $ do
-    Dir.createDirectoryIfMissing True =<< getFilePath envTempPath
-    return $ makeFilePath envTempPath name
-
-resolveTempFileName'
-    :: (MonadReader Env m, MonadIO m)
-    => RawName
-    -> m FilePath
-resolveTempFileName' name =
-    resolveTempFileName name >>= liftIO . getFilePath
-
-cleanUpTempFiles :: (MonadReader Env m, MonadIO m) => m ()
-cleanUpTempFiles = ask >>= \Env{..} -> liftIO $
-    Dir.removeDirectoryRecursive =<< getFilePath envTempPath
-
-resolveCacheFileName
-    :: (MonadReader Env m, MonadIO m)
-    => RawName
-    -> m (Path Abs File)
-resolveCacheFileName name = ask >>= \Env{..} ->
-    liftIO $ mkCacheFileName envCachePath (repoURL envRepository) name
-
-resolveCacheFileName'
-    :: (MonadReader Env m, MonadIO m)
-    => RawName
-    -> m FilePath
-resolveCacheFileName' name =
-    resolveCacheFileName name >>= liftIO . getFilePath
-
-mkCacheFileName :: Path Abs Dir -> Text -> RawName -> IO (Path Abs File)
-mkCacheFileName cachePath repoURL name = do
-    let dir = pushDir cachePath (T.encodeUtf8 $ URI.encodeText repoURL)
-    Dir.createDirectoryIfMissing True =<< getFilePath dir
+    -- directory structure is <encoded-repo-url>/<encoded-source-url>
+    let dir = foldl pushDir cachePath [ encode repoURL', encode srcPath ]
+    -- ensure directory exxists
+    liftIO $ Dir.createDirectoryIfMissing True =<< getFilePath dir
     return $ makeFilePath dir name
+  where
+    encode = SB.toShort . T.encodeUtf8 . URI.encodeText
 
 -- | Group tagged-offsets and store IDs into distinct ChunkList per tag.
 packChunkLists
@@ -481,11 +566,16 @@ packChunkLists = groupByTag mkChunkList
         _ -> ChunkList mempty 0
 
 makeSnapshot
-    :: (MonadReader Env m, MonadFail m, MonadIO m)
+    :: (MonadReader Env m, MonadIO m)
     => Stream' (Tree, ChunkList) m r
     -> m Snapshot
 makeSnapshot str = do
-    ((Tree, chunkList):_) :> _ <- S.toList str
+    res :> _ <- S.toList str
+    let chunkList =
+            case res of
+                (Tree, chunkList):_ -> chunkList
+                _ -> error "Assertion failed: no tree"
+
     hostDir <- asks envDirectory
     startT  <- asks envStartTime
     repo    <- asks envRepository
@@ -585,7 +675,7 @@ newtype VerifyResult = VerifyResult
     } deriving (Show, Semigroup, Monoid)
 
 summariseErrors
-    :: (MonadState Progress m, MonadIO m)
+    :: (MonadIO m)
     => Stream' (Either (Error FileItem) (PlainChunk FileItem)) m r
     -> Stream' (FileItem, VerifyResult) m r
 summariseErrors
@@ -597,38 +687,5 @@ summariseErrors
     fromChunk c = (cOffsets c,   VerifyResult Seq.empty)
 
 -- | Measure the stored size (encrypted and compressed size) of CipherChunk
-measureStoredSize
-    :: MonadState Progress m
-    => CipherChunk t
-    -> m ()
-measureStoredSize Chunk{..} = do
-    let encodedSize = fromIntegral $ B.length (cSecretBox cContent)
-    modify $ over prStoredSize (+ encodedSize)
-
--- | Measure the size saved by de-duplication.
-measureDedupSize
-    :: MonadState Progress m
-    => Maybe Int
-    -> m ()
-measureDedupSize size =
-    modify $ over prDedupSize (+ maybe 0 fromIntegral size)
-
--- | Run an action using a temporary chunk cache
-withChunkCache
-  :: (MonadReader Env m, MonadResource m)
-  => (ChunkCache.Connection -> m r)
-  -> m r
-withChunkCache f = do
-    cacheFile   <- T.pack <$> resolveTempFileName' "chunks"
-    (key, conn) <- allocate (ChunkCache.connect cacheFile) ChunkCache.close
-    r <- f conn
-    release key
-    return r
-
--- | Monadic map over the left values of an Either type.
-mapLeftM :: Monad m => (a -> m c) -> Either a b -> m (Either c b)
-mapLeftM f = either (fmap Left . f) (return . Right)
-
--- | Monadic map over the right values of an Either type.
-mapRightM :: Monad m => (b -> m c) -> Either a b -> m (Either a c)
-mapRightM f = either (return . Left) (fmap Right . f)
+storedSize :: CipherChunk t -> Int64
+storedSize Chunk{..} = fromIntegral $ B.length (cSecretBox cContent)

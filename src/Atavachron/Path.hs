@@ -1,11 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- | An encoding-independent, type-safe and efficient file path.
@@ -20,6 +18,7 @@
 module Atavachron.Path where
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Short as SB
 import qualified Data.ByteString.Char8 as B8
 
 import Codec.Serialise
@@ -38,7 +37,8 @@ import qualified GHC.Foreign as GHC
 
 import qualified Data.List as List
 
-type RawName = B.ByteString
+-- NOTE: we use unpinned short bytestrings to help avoid heap fragmentation.
+type RawName = SB.ShortByteString
 
 data Abs
 data Rel
@@ -68,8 +68,10 @@ data Path :: * -> * -> * where
 (</>) dir (FilePath relDir name) =
     FilePath (dir </> relDir) name
 
+-- | NOTE: The argument order works well with foldl, e.g.
+-- @foldl pushDir path [...]@
 pushDir :: Path b Dir -> RawName -> Path b Dir
-pushDir (AbsDir ns) n      = AbsDir $ ns Seq.|> n
+pushDir (AbsDir ns)      n = AbsDir $ ns Seq.|> n
 pushDir (RelDir pops ns) n = RelDir pops $ ns Seq.|> n
 
 popDir :: Path b Dir -> Path b Dir
@@ -109,10 +111,11 @@ isAbsolute (FilePath dir _) = isAbsolute dir
 
 isPrefixOf :: Path Abs Dir -> Path Abs Dir -> Bool
 isPrefixOf (AbsDir ns1) (AbsDir ns2) =
-    List.isPrefixOf (toList ns1) (toList ns2)
+    toList ns1 `List.isPrefixOf` toList ns2
 
 getRawFilePath :: Path b t -> RawFilePath
-getRawFilePath p = B.concat . prefix . List.intersperse "/" $ go p
+getRawFilePath p =
+    B.concat . map SB.fromShort . prefix . List.intersperse "/" $ go p
   where
     go :: Path b t -> [RawName]
     go (AbsDir ns)      = toList ns
@@ -124,7 +127,7 @@ getRawFilePath p = B.concat . prefix . List.intersperse "/" $ go p
 
 -- | Relativise the second path, using the first path as the prefix.
 relativise :: Path Abs Dir -> Path Abs t -> Path Rel t
-relativise prefix absDir@(AbsDir{})      = makeRelDir prefix absDir
+relativise prefix absDir@AbsDir{}        = makeRelDir prefix absDir
 relativise prefix (FilePath absDir name) = flip makeFilePath name $ makeRelDir prefix absDir
 
 makeRelDir :: Path Abs Dir -> Path Abs Dir -> Path Rel Dir
@@ -199,6 +202,7 @@ parseAbsDir :: FilePath -> Maybe (Path Abs Dir)
 parseAbsDir fp
     | FilePath.isValid fp && FilePath.isAbsolute fp =
       case FilePath.splitDirectories fp of
-          ("/":ns) -> Just $ AbsDir (Seq.fromList $ map (encodeUtf8 . T.pack) ns)
+          ("/":ns) -> Just .  AbsDir . Seq.fromList $
+                      map (SB.toShort . encodeUtf8 . T.pack) ns
           _        -> Nothing
     | otherwise = Nothing

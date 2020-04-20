@@ -1,9 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
-
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 -- | Builder is a wrapper around a ByteString builder containing
 -- tagged offsets.
@@ -27,7 +24,7 @@ import qualified Data.ByteString.Builder as BB
 import Streaming.Prelude (next)
 import qualified Streaming.Prelude as S
 
-import Data.Semigroup (Semigroup (..))
+-- import Data.Semigroup (Semigroup (..))
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 

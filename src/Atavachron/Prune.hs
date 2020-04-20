@@ -8,7 +8,7 @@ import Data.Function (on)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Ord
-import Data.Time (UTCTime(..), fromGregorianValid)
+import Data.Time (UTCTime(..))
 import Data.Time.Calendar
 import Data.Time.Calendar.Julian
 import Data.Time.Calendar.WeekDate
@@ -75,7 +75,7 @@ mkTimeMeta time = TimeMeta days weeks months year time
 -- Test
 
 test :: IO ()
-test = mapM_ (putStrLn . show) [ mkTimeMeta m () | m <- prune settings id items]
+test = mapM_ print [ mkTimeMeta m () | m <- prune settings id items]
   where
     settings = PruneSettings (Just 3) (Just 2) Nothing (Just 2)
     items = map (\(Just d) -> UTCTime d 0)

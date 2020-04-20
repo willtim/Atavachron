@@ -1,43 +1,42 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
--- | Environment and other types used throught Atavachron pipelines.
+-- | Environment and other types used throughout the Atavachron pipelines.
 --
 
 module Atavachron.Env where
 
-import Control.Lens
 import Control.Exception
+import Control.Monad.IO.Class
 
 import Data.Int
+import Data.IORef
 import Data.Typeable
-
 import Data.Time (UTCTime)
+
+import Numeric.Natural
 
 import Atavachron.Repository
 import Atavachron.Path
 import Atavachron.Chunk.Builder
 import Atavachron.Chunk.Encode
-import Atavachron.Streaming (TaskGroup)
 
 
 -- | Environment used during backup, verify and restore.
 data Env = Env
-  { envRepository        :: Repository       -- ^ The remote destination repository.
-  , envStartTime         :: !UTCTime         -- ^ Start time of current backup.
-  , envRetries           :: !Int             -- ^ Number of times to retry failed gets and puts to the store.
-  , envTaskBufferSize    :: !Int             -- ^ Size of readahead for the stream, used for parallel processing.
-  , envTaskGroup         :: !TaskGroup       -- ^ Sized with the number of processing cores.
-  , envCachePath         :: !(Path Abs Dir)  -- ^ Directory used to store local cache files.
-  , envTempPath          :: !(Path Abs Dir)  -- ^ A temporary directory for this process to use.
-  , envFilePredicate     :: !FilePredicate   -- ^ Predicate for including/excluding files to process.
-  , envDirectory         :: !(Path Abs Dir)  -- ^ The local directory being backed up or restored to.
-  , envBackupBinary      :: !Bool            -- ^ If true, include an (unencrypted) backup of the program binary.
-  , envGarbageExpiryDays :: !Int             -- ^ A garbage expiry time in days, greater than the longest likely backup.
+  { envRepository        :: Repository     -- ^ The remote destination repository.
+  , envStartTime         :: UTCTime        -- ^ Start time of current backup.
+  , envRetries           :: Natural        -- ^ Number of times to retry failed gets and puts to the store.
+  , envTaskBufferSize    :: Natural        -- ^ Size of task queue used for parallel processing.
+  , envTaskGroup         :: Natural        -- ^ Number of parallel worker threads (default is available processing cores).
+  , envCachePath         :: Path Abs Dir   -- ^ Directory used to store local cache files.
+  , envFilePredicate     :: FilePredicate  -- ^ Predicate for including/excluding files to process.
+  , envDirectory         :: Path Abs Dir   -- ^ The local directory being backed up or restored to.
+  , envBackupBinary      :: Bool           -- ^ If true, include an (unencrypted) backup of the program binary.
+  , envGarbageExpiryDays :: Natural        -- ^ A garbage expiry time in days, greater than the longest likely backup.
+  , envProgressRef       :: IORef Progress -- ^ Global variable holding the backup progress indicator.
   }
 
 -- for now, just a predicate on the filepath
@@ -62,20 +61,34 @@ disjunction preds = FilePredicate $ \p ->
     or <$> mapM (`applyPredicate` p) preds
 
 -- | Progress state used during backup.
--- TODO better errors and warnings, e.g. show retries?
+-- NOTE: Progress is a monoid in order to allow aggregation of the
+-- progress of concurrent tasks.
 data Progress = Progress
-  { _prFiles      :: !Int64
-  , _prChunks     :: !Int64
-  , _prInputSize  :: !Int64
-  , _prDedupSize  :: !Int64 -- deduplicated size
-  , _prStoredSize :: !Int64 -- deduplicated and compressed size
-  , _prErrors     :: !Int64
+  { prFiles      :: !Int64
+  , prChunks     :: !Int64
+  , prInputSize  :: !Int64
+  , prDedupSize  :: !Int64 -- deduplicated size
+  , prStoredSize :: !Int64 -- deduplicated and compressed size
+  , prErrors     :: !Int64 -- download errors, upload retries
   } deriving (Show)
 
-makeLenses ''Progress
+instance Semigroup Progress where
+    (<>) p q =
+        Progress { prFiles      = prFiles p      + prFiles q
+                 , prChunks     = prChunks p     + prChunks q
+                 , prInputSize  = prInputSize p  + prInputSize q
+                 , prDedupSize  = prDedupSize p  + prDedupSize q
+                 , prStoredSize = prStoredSize p + prStoredSize q
+                 , prErrors     = prErrors p     + prErrors q
+                 }
 
-initialProgress :: Progress
-initialProgress = Progress 0 0 0 0 0 0
+instance Monoid Progress where
+    mempty = Progress 0 0 0 0 0 0
+    mappend = (<>)
+
+updateProgress :: MonadIO m => IORef Progress -> Progress -> m Progress
+updateProgress ref upd =
+    liftIO $ atomicModifyIORef' ref $ \p -> let !p' = p <> upd in (p', p')
 
 data ErrorKind
   = StoreError

@@ -13,6 +13,7 @@ import Data.Maybe
 import qualified Data.List as L
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Short as SB
 import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as L
@@ -117,4 +118,4 @@ genPrintableByteString minLength maxLength = do
     chars = elements ['a'..'z']
 
 genPath :: Gen (Path Abs File)
-genPath = makeFilePath (AbsDir mempty) <$> genPrintableByteString 8 16
+genPath = makeFilePath (AbsDir mempty) . SB.toShort <$> genPrintableByteString 8 16

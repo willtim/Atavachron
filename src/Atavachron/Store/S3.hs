@@ -29,7 +29,7 @@ import qualified Data.Text.Encoding      as T
 
 import           Network.HTTP.Client
 import           Network.HTTP.Types.Status
-import           Network.HTTP.Conduit (newManager, tlsManagerSettings, responseBody)
+import           Network.HTTP.Conduit (tlsManagerSettings)
 
 import qualified Aws
 import qualified Aws.Core as Aws
