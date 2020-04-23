@@ -83,13 +83,13 @@ deleteGarbage
     -> m ()
 deleteGarbage repo = do
    --- Run chunk repair first as a precaution against any (old, expired) referenced garbage chunks
-   logInfo "Forcing a chunk repair..."
+   logInfo "Forcing a chunk repair ..."
    chunkRepair repo
 
    t1  <- asks envStartTime
    ttl <- asks envGarbageExpiryDays
 
-   logInfo $ "Finding and deleting expired garbage (expiry is " <> T.pack (show ttl) <> " days)..."
+   logInfo $ "Finding and deleting expired garbage (expiry is " <> T.pack (show ttl) <> " days) ..."
    deleted S.:> _ <-
        S.sum
        . S.mapM deleteGarbageChunks'
@@ -225,7 +225,7 @@ chunkCheck repo = do
       MSet.withEmptySet conn "chunks" $ \chunksSet -> do
 
         -- Add chunks referenced by all snapshots in the repository to cache.
-        logInfo "Listing chunks referenced by snapshots..."
+        logInfo "Listing chunks referenced by snapshots ..."
         sinkChunks chunksSet snapChunks MSet.insert
 
         -- This is all referenced chunks from all repository snapshots
@@ -237,7 +237,7 @@ chunkCheck repo = do
         -- There are two sets we are interested in:
         -- 1) missing: chunks in cache, not in this stream
         -- 2) collectable: chunks in this stream, but not in cache
-        logInfo "Listing all chunks in repository..."
+        logInfo "Listing all chunks in repository ..."
         collectable S.:> _ <- count $ filterNotInChunkCache chunksSet repoChunks
         missing <- liftIO $ MSet.size chunksSet
 
@@ -246,7 +246,7 @@ chunkCheck repo = do
         -- 1) referenced garbage: chunks in cache and in garbage stream
         -- 2) garbage (unreferenced): chunks not in cache, but in the stream
         -- 3) missing completely: chunks in cache, but not in stream
-        logInfo "Listing all garbage chunks in repository..."
+        logInfo "Listing all garbage chunks in repository ..."
         unreferenced_garbage S.:> _ <- count $ filterNotInChunkCache chunksSet garbageChunks
         missing_completely <- liftIO $ MSet.size chunksSet
 
@@ -308,12 +308,12 @@ chunkRepair repo = do
       MSet.withEmptySet conn "chunks" $ \chunksSet -> do
 
         -- Add chunks referenced by all snapshots in the repository to cache.
-        logInfo "Listing chunks referenced by snapshots..."
+        logInfo "Listing chunks referenced by snapshots ..."
         sinkChunks chunksSet snapChunks MSet.insert
 
         -- List all chunks in repo and remove them from the cache.
         -- The cache should then contain missing chunks.
-        logInfo "Listing all chunks in repository..."
+        logInfo "Listing all chunks in repository ..."
         sinkChunks chunksSet repoChunks MSet.delete
 
         let missingStr = hoist liftIO $ MSet.elems chunksSet

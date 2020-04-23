@@ -49,13 +49,18 @@ import qualified Atavachron.Store as Store
 
 type Config      = Aws.Configuration
 type Endpoint    = S3.S3Configuration Aws.NormalQuery
+type Host        = Text
 type BucketName  = Text
 type ObjectKey   = Text
 
-newS3Store :: Text -> Endpoint -> BucketName -> IO Store
-newS3Store name endpoint bucketName = do
+newS3Store :: (Host, Endpoint, BucketName) -> IO Store
+newS3Store (host, endpoint, bucketName) = do
+
     cfg <- baseConfiguration
-    let params = (cfg, endpoint)
+
+    let name = "s3://" <> host <> "/" <> bucketName
+
+        params = (cfg, endpoint)
 
         list :: Store.Path -> Stream (Of Store.Key) (ResourceT IO) ()
         list (Store.Path prefix) =
@@ -90,13 +95,12 @@ newS3Store name endpoint bucketName = do
 
     return Store{..}
 
-
-parseS3URL :: Text -> Maybe (Endpoint, BucketName)
+parseS3URL :: Text -> Maybe (Host, Endpoint, BucketName)
 parseS3URL url = do
     let (host, bucketName) = second (T.drop 1) $ T.breakOn "/" url
         endpoint = S3.s3v4 Aws.HTTPS (T.encodeUtf8 host) False S3.AlwaysUnsigned -- NB: assumes UTF8 (!)
         --endpoint = S3.s3 Aws.HTTPS (T.encodeUtf8 host) True -- NB: assumes UTF8 (!)
-    return (endpoint { S3.s3RequestStyle = S3.PathStyle }, bucketName)
+    return (host, endpoint { S3.s3RequestStyle = S3.PathStyle }, bucketName)
 
 listObjects'
     :: (Config, Endpoint)

@@ -10,7 +10,6 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.Resource
 
 import Data.Time
-import Data.Text (Text)
 import qualified Data.Text as T
 
 import qualified Data.ByteString.Lazy as LB
@@ -24,14 +23,17 @@ import Atavachron.Streaming (Stream')
 import qualified Streaming.Prelude as S
 
 
-newLocalFS :: Text -> Path Abs Dir -> Store
-newLocalFS name root = Store{..}
+newLocalFS :: Path Abs Dir -> IO Store
+newLocalFS root = do
+    name <- T.pack . ("file://" <>) <$> getFilePath root
+    return $ Store{..}
+
   where
 
     list :: Store.Path -> Stream' Store.Key (ResourceT IO) ()
     list path@(Store.Path p) = do
         liftIO $ ensureSubdir path
-        dir <- liftIO $ (T.pack . (</> T.unpack p)) <$> getFilePath root
+        dir <- liftIO $ T.pack . (</> T.unpack p) <$> getFilePath root
         listFilesRecursively (Store.Path dir)
 
     get :: Store.Key -> IO LB.ByteString

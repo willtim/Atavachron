@@ -390,9 +390,9 @@ listSnapshots :: URL -> Maybe (Text, Path Abs Dir) -> IO ()
 listSnapshots repoURL source = do
     case source of
         Just (host, path) ->
-            putStrLn $ "Listing snapshots for //" <> T.unpack host <> show path <> "..."
+            putStrLn $ "Listing snapshots for //" <> T.unpack host <> show path <> " ..."
         Nothing ->
-            putStrLn "Listing all snapshots in the repository..."
+            putStrLn "Listing all snapshots in the repository ..."
 
     store     <- parseURL'    repoURL
     repo      <- authenticate store
@@ -747,21 +747,19 @@ parseGlob g = FilePredicate $ fmap (match patt) . getFilePath
     patt | "/" `T.isPrefixOf` g = panic $ "File path glob pattern must be relative not absolute: " <> g
          | otherwise = simplify $ compile $ T.unpack g
 
--- TODO move URL parsing logic to each individual store?
 parseURL :: URL -> IO (Either Text Store)
 parseURL URL{..} =
     case "://" `T.breakOn` urlText of
         ("file",  T.unpack . T.drop 3 -> rest) ->
-            return $ case parseAbsDir rest of
-                Nothing   -> Left $ "Cannot parse file URL: " <> urlText
-                Just path -> Right $ Store.newLocalFS urlText path
+            case parseAbsDir rest of
+                Nothing   -> return . Left $ "Cannot parse file URL: " <> urlText
+                Just path -> Right <$> Store.newLocalFS path
         ("s3", T.drop 3 -> rest) ->
             case Store.parseS3URL rest of
-                Nothing   ->
-                    return $ Left $ "Cannot parse S3 URL: " <> urlText
-                Just (region, bucketName) ->
-                    Right <$> Store.newS3Store urlText region bucketName
-        _ -> return $ Left $ "Cannot parse URL: " <> urlText
+                Nothing   -> return . Left $ "Cannot parse S3 URL: " <> urlText
+                Just res  -> Right <$> Store.newS3Store res
+
+        _ -> return . Left $ "Cannot parse URL: " <> urlText
 
 -- a version that blows up
 parseURL' :: URL -> IO Store

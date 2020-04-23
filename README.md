@@ -182,13 +182,17 @@ The chunks are then hashed using a secret key; and then, only if necessary, comp
 
 The highly regarded *Libsodium* provides the high-level APIs for use by cryptography non-experts such as myself. Atavachron hashes using HMAC-SHA512 and encrypts using an XSalsa20 stream cipher with Poly1305 MAC authentication. For passwords, Atavachron uses Scrypt to generate an *access key* from a password and random salt. This access key is used to encrypt the manifest key which unlocks the repository manifest and therefore all the data within the repository. The encrypted manifest key and password salt are written into the store under /keys/ using a label chosen by the user. This scheme supports multiple passwords to the repository and the possibility of revoking/changing a password.
 
+### Can a backup be efficiently queried or mounted as a filesystem?
+
+Atavachron is not built for this use-case. This requirement would add significant complexity to the implementation and the stored data structures. Atavachron is more akin to a de-duplicating tar utility rather than a remote file-system.
+
 ### How does prune work without locks?
 
 Concurrent backups work well without any locks, since we are only ever appending to the repository. Pruning snapshots does however present problems, since we will need to delete chunks potentially referenced by other snapshots, including snapshots that are not yet visible. In order to support eventually-consistent storage like Amazon S3, we cannot safely use locks and so instead rely on a two-staged approach to pruning. The actual 'prune' command deletes only snapshot files and moves any chunks no longer referenced by the remaining snapshots into a garbage folder (garbage collection). If there is a concurrent backup running, it's possible that some chunks which were *optimistically* marked as garbage, turn out to be referenced once the concurrent backup completes. Such chunks will be restored as part of the `chunks --delete-garbage` command, which runs a repair prior to actually deleting the garbage. This command permanently deletes any garbage that matches the configured garbage expiry time (which defaults to 30 days). The expiry time should be set to exceed the longest likely backup time and ensures that any concurrently running backup that started before the last prune operation will have finished.
 
 ### Why Haskell?
 
-Haskell offers a level of type-safety and expressiveness that is unmatched by most other practical languages. GHC Haskell is also capable of producing highly performant executables from very high-level abstract code. Atavachron has been written largely by composing transformations on effectful on-demand streams, resulting in better modularity and separation-of-concerns when compared to more traditional approaches. The high-level pipeline architecture should be visible in the source file [Pipelines.hs](https://github.com/willtim/Atavachron/blob/master/src/Atavachron/Pipelines.hs).
+Haskell offered a level of type-safety and expressiveness that allowed rapid development of this (spare time) project. GHC Haskell is also capable of producing highly performant executables from very high-level abstract code. However, it is often very difficult to reason about the space complexity and memory-usage of Haskell code. If I were ever tempted to re-write the project from scratch, I would very much like to try Rust.
 
 ### What is property-based testing?
 
